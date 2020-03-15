@@ -1,1 +1,2 @@
-import SidebarPlugin
+from . import SidebarPlugin
+from . import ConsolePlugin

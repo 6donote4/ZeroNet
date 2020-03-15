@@ -1,4 +1,4 @@
-import cStringIO as StringIO
+import io
 
 import pytest
 import time
@@ -20,10 +20,10 @@ class TestFileRequest:
 
         # Normal request
         response = connection.request("getFile", {"site": site.address, "inner_path": "content.json", "location": 0})
-        assert "sign" in response["body"]
+        assert b"sign" in response["body"]
 
         response = connection.request("getFile", {"site": site.address, "inner_path": "content.json", "location": 0, "file_size": site.storage.getSize("content.json")})
-        assert "sign" in response["body"]
+        assert b"sign" in response["body"]
 
         # Invalid file
         response = connection.request("getFile", {"site": site.address, "inner_path": "invalid.file", "location": 0})
@@ -35,7 +35,7 @@ class TestFileRequest:
 
         # Stream from parent dir
         response = connection.request("getFile", {"site": site.address, "inner_path": "../users.json", "location": 0})
-        assert "File read error" in response["error"]
+        assert "File read exception" in response["error"]
 
         # Invalid site
         response = connection.request("getFile", {"site": "", "inner_path": "users.json", "location": 0})
@@ -48,6 +48,12 @@ class TestFileRequest:
         response = connection.request("getFile", {"site": site.address, "inner_path": "content.json", "location": 0, "file_size": 1234})
         assert "File size does not match" in response["error"]
 
+        # Invalid path
+        for path in ["../users.json", "./../users.json", "data/../content.json", ".../users.json"]:
+            for sep in ["/", "\\"]:
+                response = connection.request("getFile", {"site": site.address, "inner_path": path.replace("/", sep), "location": 0})
+                assert response["error"] == 'File read exception'
+
         connection.close()
         client.stop()
 
@@ -57,27 +63,27 @@ class TestFileRequest:
         connection = client.getConnection(file_server.ip, 1544)
         file_server.sites[site.address] = site
 
-        buff = StringIO.StringIO()
+        buff = io.BytesIO()
         response = connection.request("streamFile", {"site": site.address, "inner_path": "content.json", "location": 0}, buff)
         assert "stream_bytes" in response
-        assert "sign" in buff.getvalue()
+        assert b"sign" in buff.getvalue()
 
         # Invalid file
-        buff = StringIO.StringIO()
+        buff = io.BytesIO()
         response = connection.request("streamFile", {"site": site.address, "inner_path": "invalid.file", "location": 0}, buff)
         assert "File read error" in response["error"]
 
         # Location over size
-        buff = StringIO.StringIO()
+        buff = io.BytesIO()
         response = connection.request(
             "streamFile", {"site": site.address, "inner_path": "content.json", "location": 1024 * 1024}, buff
         )
         assert "File read error" in response["error"]
 
         # Stream from parent dir
-        buff = StringIO.StringIO()
+        buff = io.BytesIO()
         response = connection.request("streamFile", {"site": site.address, "inner_path": "../users.json", "location": 0}, buff)
-        assert "File read error" in response["error"]
+        assert "File read exception" in response["error"]
 
         connection.close()
         client.stop()
@@ -85,7 +91,7 @@ class TestFileRequest:
     def testPex(self, file_server, site, site_temp):
         file_server.sites[site.address] = site
         client = FileServer(file_server.ip, 1545)
-        client.sites[site_temp.address] = site_temp
+        client.sites = {site_temp.address: site_temp}
         site_temp.connection_server = client
         connection = client.getConnection(file_server.ip, 1544)
 

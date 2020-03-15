@@ -3,7 +3,7 @@ import time
 from util import helper
 
 from Plugin import PluginManager
-from BootstrapperDb import BootstrapperDb
+from .BootstrapperDb import BootstrapperDb
 from Crypt import CryptRsa
 from Config import config
 
@@ -23,7 +23,7 @@ class FileRequestPlugin(object):
         onions_signed = []
         # Check onion signs
         for onion_publickey, onion_sign in onion_signs.items():
-            if CryptRsa.verify(onion_sign_this, onion_publickey, onion_sign):
+            if CryptRsa.verify(onion_sign_this.encode(), onion_publickey, onion_sign):
                 onions_signed.append(CryptRsa.publickeyToOnion(onion_publickey))
             else:
                 break
@@ -69,8 +69,7 @@ class FileRequestPlugin(object):
             i += 1
 
         hashes_changed = 0
-        db.execute("BEGIN")
-        for onion, onion_hashes in onion_to_hash.iteritems():
+        for onion, onion_hashes in onion_to_hash.items():
             hashes_changed += db.peerAnnounce(
                 ip_type="onion",
                 address=onion,
@@ -78,7 +77,6 @@ class FileRequestPlugin(object):
                 hashes=onion_hashes,
                 onion_signed=all_onions_signed
             )
-        db.execute("END")
         time_db_onion = time.time() - s
 
         s = time.time()
@@ -113,7 +111,7 @@ class FileRequestPlugin(object):
 
             hash_peers = db.peerList(
                 hash,
-                address=self.connection.ip, onions=onion_to_hash.keys(), port=params["port"],
+                address=self.connection.ip, onions=list(onion_to_hash.keys()), port=params["port"],
                 limit=min(limit, params["need_num"]), need_types=params["need_types"], order=order
             )
             if "ip4" in params["need_types"]:  # Backward compatibility
@@ -132,6 +130,7 @@ class FileRequestPlugin(object):
 
 @PluginManager.registerTo("UiRequest")
 class UiRequestPlugin(object):
+    @helper.encodeResponse
     def actionStatsBootstrapper(self):
         self.sendHeader()
 
@@ -151,7 +150,7 @@ class UiRequestPlugin(object):
             ).fetchall()
 
             yield "<br>%s (added: %s, peers: %s)<br>" % (
-                str(hash_row["hash"]).encode("hex"), hash_row["date_added"], len(peer_rows)
+                str(hash_row["hash"]).encode().hex(), hash_row["date_added"], len(peer_rows)
             )
             for peer_row in peer_rows:
-                yield " - {ip4: <30} {onion: <30} added: {date_added}, announced: {date_announced}<br>".format(**dict(peer_row))
+                yield " - {type} {address}:{port} added: {date_added}, announced: {date_announced}<br>".format(**dict(peer_row))

@@ -34,14 +34,14 @@ class TestTor:
         address = tor_manager.addOnion()
 
         # Sign
-        sign = CryptRsa.sign("hello", tor_manager.getPrivatekey(address))
+        sign = CryptRsa.sign(b"hello", tor_manager.getPrivatekey(address))
         assert len(sign) == 128
 
         # Verify
         publickey = CryptRsa.privatekeyToPublickey(tor_manager.getPrivatekey(address))
         assert len(publickey) == 140
-        assert CryptRsa.verify("hello", publickey, sign)
-        assert not CryptRsa.verify("not hello", publickey, sign)
+        assert CryptRsa.verify(b"hello", publickey, sign)
+        assert not CryptRsa.verify(b"not hello", publickey, sign)
 
         # Pub to address
         assert CryptRsa.publickeyToOnion(publickey) == address
@@ -54,7 +54,7 @@ class TestTor:
         file_server.tor_manager.start_onions = True
         address = file_server.tor_manager.getOnion(site.address)
         assert address
-        print "Connecting to", address
+        print("Connecting to", address)
         for retry in range(5):  # Wait for hidden service creation
             time.sleep(10)
             try:
@@ -117,7 +117,7 @@ class TestTor:
         file_server.tor_manager = tor_manager
 
         client = FileServer(file_server.ip, 1545)
-        client.sites[site_temp.address] = site_temp
+        client.sites = {site_temp.address: site_temp}
         site_temp.connection_server = client
 
         # Add file_server as peer to client
@@ -135,17 +135,17 @@ class TestTor:
         fake_peer_3.hashfield.append(1235)
         fake_peer_3.hashfield.append(1236)
 
-        assert peer_file_server.findHashIds([1234, 1235]) == {
-            1234: [('1.2.3.5', 1545), ("bka4ht2bzxchy44r.onion", 1544)],
-            1235: [('1.2.3.6', 1546), ('1.2.3.5', 1545)]
-        }
+        res = peer_file_server.findHashIds([1234, 1235])
+
+        assert sorted(res[1234]) == [('1.2.3.5', 1545), ("bka4ht2bzxchy44r.onion", 1544)]
+        assert sorted(res[1235]) == [('1.2.3.5', 1545), ('1.2.3.6', 1546)]
 
         # Test my address adding
         site.content_manager.hashfield.append(1234)
 
         res = peer_file_server.findHashIds([1234, 1235])
-        assert res[1234] == [('1.2.3.5', 1545), ("bka4ht2bzxchy44r.onion", 1544), (file_server.ip, 1544)]
-        assert res[1235] == [('1.2.3.6', 1546), ('1.2.3.5', 1545)]
+        assert sorted(res[1234]) == [('1.2.3.5', 1545), (file_server.ip, 1544), ("bka4ht2bzxchy44r.onion", 1544)]
+        assert sorted(res[1235]) == [('1.2.3.5', 1545), ('1.2.3.6', 1546)]
 
     def testSiteOnion(self, tor_manager):
         with mock.patch.object(config, "tor", "always"):

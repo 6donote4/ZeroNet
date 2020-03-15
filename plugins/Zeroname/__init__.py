@@ -1,2 +1,1 @@
-import UiRequestPlugin
-import SiteManagerPlugin
+from . import SiteManagerPlugin

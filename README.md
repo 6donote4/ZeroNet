@@ -1,7 +1,4 @@
-# ZeroNet [![Build Status](https://travis-ci.org/HelloZeroNet/ZeroNet.svg?branch=master)](https://travis-ci.org/HelloZeroNet/ZeroNet) [![Documentation](https://img.shields.io/badge/docs-faq-brightgreen.svg)](https://zeronet.io/docs/faq/) [![Help](https://img.shields.io/badge/keep_this_project_alive-donate-yellow.svg)](https://zeronet.io/docs/help_zeronet/donate/)
-
-[简体中文](./README-zh-cn.md)
-[Русский](./README-ru.md)
+# ZeroNet [![Build Status](https://travis-ci.org/HelloZeroNet/ZeroNet.svg?branch=py3)](https://travis-ci.org/HelloZeroNet/ZeroNet) [![Documentation](https://img.shields.io/badge/docs-faq-brightgreen.svg)](https://zeronet.io/docs/faq/) [![Help](https://img.shields.io/badge/keep_this_project_alive-donate-yellow.svg)](https://zeronet.io/docs/help_zeronet/donate/) ![tests](https://github.com/HelloZeroNet/ZeroNet/workflows/tests/badge.svg)
 
 Decentralized websites using Bitcoin crypto and the BitTorrent network - https://zeronet.io
 
@@ -64,93 +61,37 @@ Decentralized websites using Bitcoin crypto and the BitTorrent network - https:/
 
 ## How to join
 
-* Download ZeroBundle package:
-  * [Microsoft Windows](https://github.com/HelloZeroNet/ZeroNet-win/archive/dist/ZeroNet-win.zip)
-  * [Apple macOS](https://github.com/HelloZeroNet/ZeroNet-mac/archive/dist/ZeroNet-mac.zip)
-  * [Linux x86/64-bit](https://github.com/HelloZeroNet/ZeroBundle/raw/master/dist/ZeroBundle-linux64.tar.gz)
-  * [Linux x86/32-bit](https://github.com/HelloZeroNet/ZeroBundle/raw/master/dist/ZeroBundle-linux32.tar.gz)
-* Unpack anywhere
-* Run `ZeroNet.exe` (win), `ZeroNet(.app)` (osx), `ZeroNet.sh` (linux)
+### Windows
 
-### Linux terminal on x86-64
+ - Download [ZeroNet-py3-win64.zip](https://github.com/HelloZeroNet/ZeroNet-win/archive/dist-win64/ZeroNet-py3-win64.zip) (18MB)
+ - Unpack anywhere
+ - Run `ZeroNet.exe`
+ 
+### macOS
 
-* `wget https://github.com/HelloZeroNet/ZeroBundle/raw/master/dist/ZeroBundle-linux64.tar.gz`
-* `tar xvpfz ZeroBundle-linux64.tar.gz`
-* `cd ZeroBundle`
-* Start with `./ZeroNet.sh`
+ - Download [ZeroNet-dist-mac.zip](https://github.com/HelloZeroNet/ZeroNet-dist/archive/mac/ZeroNet-dist-mac.zip) (13.2MB)
+ - Unpack anywhere
+ - Run `ZeroNet.app`
+ 
+### Linux (x86-64bit)
+ - `wget https://github.com/HelloZeroNet/ZeroNet-linux/archive/dist-linux64/ZeroNet-py3-linux64.tar.gz`
+ - `tar xvpfz ZeroNet-py3-linux64.tar.gz`
+ - `cd ZeroNet-linux-dist-linux64/`
+ - Start with: `./ZeroNet.sh`
+ - Open the ZeroHello landing page in your browser by navigating to: http://127.0.0.1:43110/
+ 
+ __Tip:__ Start with `./ZeroNet.sh --ui_ip '*' --ui_restrict your.ip.address` to allow remote connections on the web interface.
 
-It downloads the latest version of ZeroNet then starts it automatically.
+### Install from source
 
-#### Manual install for Debian Linux
-
-* `sudo apt-get update`
-* `sudo apt-get install msgpack-python python-gevent`
-* `wget https://github.com/HelloZeroNet/ZeroNet/archive/master.tar.gz`
-* `tar xvpfz master.tar.gz`
-* `cd ZeroNet-master`
-* Start with `python2 zeronet.py`
-* Open http://127.0.0.1:43110/ in your browser
-
-### [Whonix](https://www.whonix.org)
-
-* [Instructions](https://www.whonix.org/wiki/ZeroNet)
-
-### [Arch Linux](https://www.archlinux.org)
-
-* `git clone https://aur.archlinux.org/zeronet.git`
-* `cd zeronet`
-* `makepkg -srci`
-* `systemctl start zeronet`
-* Open http://127.0.0.1:43110/ in your browser
-
-See [ArchWiki](https://wiki.archlinux.org)'s [ZeroNet
-article](https://wiki.archlinux.org/index.php/ZeroNet) for further assistance.
-
-### [Gentoo Linux](https://www.gentoo.org)
-
-* [`eselect repository enable raiagent`](https://github.com/leycec/raiagent)
-* `emerge --sync`
-* `echo 'net-vpn/zeronet' >> /etc/portage/package.accept_keywords`
-* *(Optional)* Enable Tor support: `echo 'net-vpn/zeronet tor' >>
-  /etc/portage/package.use`
-* `emerge zeronet`
-* `rc-service zeronet start`
-* *(Optional)* Enable zeronet at runlevel "default": `rc-update add zeronet`
-* Open http://127.0.0.1:43110/ in your browser
-
-See `/usr/share/doc/zeronet-*/README.gentoo.bz2` for further assistance.
-
-### [FreeBSD](https://www.freebsd.org/)
-
-* `pkg install zeronet` or `cd /usr/ports/security/zeronet/ && make install clean`
-* `sysrc zeronet_enable="YES"`
-* `service zeronet start`
-* Open http://127.0.0.1:43110/ in your browser
-
-### [Vagrant](https://www.vagrantup.com/)
-
-* `vagrant up`
-* Access VM with `vagrant ssh`
-* `cd /vagrant`
-* Run `python2 zeronet.py --ui_ip 0.0.0.0`
-* Open http://127.0.0.1:43110/ in your browser
-
-### [Docker](https://www.docker.com/)
-* `docker run -d -v <local_data_folder>:/root/data -p 26552:26552 -p 127.0.0.1:43110:43110 nofish/zeronet`
-* This Docker image includes the Tor proxy, which is disabled by default. Beware that some
-hosting providers may not allow you running Tor in their servers. If you want to enable it,
-set `ENABLE_TOR` environment variable to `true` (Default: `false`). E.g.:
-
- `docker run -d -e "ENABLE_TOR=true" -v <local_data_folder>:/root/data -p 26552:26552 -p 127.0.0.1:43110:43110 nofish/zeronet`
-* Open http://127.0.0.1:43110/ in your browser
-
-### [Virtualenv](https://virtualenv.readthedocs.org/en/latest/)
-
-* `virtualenv env`
-* `source env/bin/activate`
-* `pip install msgpack gevent`
-* `python2 zeronet.py`
-* Open http://127.0.0.1:43110/ in your browser
+ - `wget https://github.com/HelloZeroNet/ZeroNet/archive/py3/ZeroNet-py3.tar.gz`
+ - `tar xvpfz ZeroNet-py3.tar.gz`
+ - `cd ZeroNet-py3`
+ - `sudo apt-get update`
+ - `sudo apt-get install python3-pip`
+ - `sudo python3 -m pip install -r requirements.txt`
+ - Start with: `python3 zeronet.py`
+ - Open the ZeroHello landing page in your browser by navigating to: http://127.0.0.1:43110/
 
 ## Current limitations
 
@@ -162,48 +103,12 @@ set `ENABLE_TOR` environment variable to `true` (Default: `false`). E.g.:
 
 ## How can I create a ZeroNet site?
 
-Shut down zeronet if you are running it already
-
-```bash
-$ zeronet.py siteCreate
-...
-- Site private key: 23DKQpzxhbVBrAtvLEc2uvk7DZweh4qL3fn3jpM3LgHDczMK2TtYUq
-- Site address: 13DNDkMUExRf9Xa9ogwPKqp7zyHFEqbhC2
-...
-- Site created!
-$ zeronet.py
-...
-```
-
-Congratulations, you're finished! Now anyone can access your site using
-`http://localhost:43110/13DNDkMUExRf9Xa9ogwPKqp7zyHFEqbhC2`
+ * Click on **⋮** > **"Create new, empty site"** menu item on the site [ZeroHello](http://127.0.0.1:43110/1HeLLo4uzjaLetFx6NH3PMwFP3qbRbTf3D).
+ * You will be **redirected** to a completely new site that is only modifiable by you!
+ * You can find and modify your site's content in **data/[yoursiteaddress]** directory
+ * After the modifications open your site, drag the topright "0" button to left, then press **sign** and **publish** buttons on the bottom
 
 Next steps: [ZeroNet Developer Documentation](https://zeronet.io/docs/site_development/getting_started/)
-
-
-## How can I modify a ZeroNet site?
-
-* Modify files located in data/13DNDkMUExRf9Xa9ogwPKqp7zyHFEqbhC2 directory.
-  After you're finished:
-
-```bash
-$ zeronet.py siteSign 13DNDkMUExRf9Xa9ogwPKqp7zyHFEqbhC2
-- Signing site: 13DNDkMUExRf9Xa9ogwPKqp7zyHFEqbhC2...
-Private key (input hidden):
-```
-
-* Enter the private key you got when you created the site, then:
-
-```bash
-$ zeronet.py sitePublish 13DNDkMUExRf9Xa9ogwPKqp7zyHFEqbhC2
-...
-Site:13DNDk..bhC2 Publishing to 3/10 peers...
-Site:13DNDk..bhC2 Successfuly published to 3 peers
-- Serving files....
-```
-
-* That's it! You've successfully signed and published your modifications.
-
 
 ## Help keep this project alive
 
@@ -218,4 +123,4 @@ Site:13DNDk..bhC2 Successfuly published to 3 peers
 
 * More info, help, changelog, zeronet sites: https://www.reddit.com/r/zeronet/
 * Come, chat with us: [#zeronet @ FreeNode](https://kiwiirc.com/client/irc.freenode.net/zeronet) or on [gitter](https://gitter.im/HelloZeroNet/ZeroNet)
-* Email: hello@zeronet.io (PGP: CB9613AE)
+* Email: hello@zeronet.io (PGP: [960F FF2D 6C14 5AA6 13E8 491B 5B63 BAE6 CB96 13AE](https://zeronet.io/files/tamas@zeronet.io_pub.asc))

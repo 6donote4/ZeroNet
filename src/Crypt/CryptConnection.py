@@ -6,18 +6,30 @@ import hashlib
 import random
 
 from Config import config
-from util import SslPatch
 from util import helper
 
 
 class CryptConnectionManager:
     def __init__(self):
-        # OpenSSL params
-        if sys.platform.startswith("win"):
-            self.openssl_bin = "src\\lib\\opensslVerify\\openssl.exe"
+        if config.openssl_bin_file:
+            self.openssl_bin = config.openssl_bin_file
+        elif sys.platform.startswith("win"):
+            self.openssl_bin = "tools\\openssl\\openssl.exe"
+        elif config.dist_type.startswith("bundle_linux"):
+            self.openssl_bin = "../runtime/bin/openssl"
         else:
             self.openssl_bin = "openssl"
-        self.openssl_env = {"OPENSSL_CONF": "src/lib/opensslVerify/openssl.cnf"}
+
+        self.context_client = None
+        self.context_server = None
+
+        self.openssl_conf_template = "src/lib/openssl/openssl.cnf"
+        self.openssl_conf = config.data_dir + "/openssl.cnf"
+
+        self.openssl_env = {
+            "OPENSSL_CONF": self.openssl_conf,
+            "RANDFILE": config.data_dir + "/openssl-rand.tmp"
+        }
 
         self.crypt_supported = []  # Supported cryptos
 
@@ -47,10 +59,11 @@ class CryptConnectionManager:
                     certfile=self.cert_pem, ciphers=ciphers
                 )
             else:
-                sock_wrapped = ssl.wrap_socket(sock, ciphers=ciphers)
+                sock_wrapped = self.context_client.wrap_socket(sock, server_hostname=random.choice(self.fakedomains))
             if cert_pin:
                 cert_hash = hashlib.sha256(sock_wrapped.getpeercert(True)).hexdigest()
-                assert cert_hash == cert_pin, "Socket certificate does not match (%s != %s)" % (cert_hash, cert_pin)
+                if cert_hash != cert_pin:
+                    raise Exception("Socket certificate does not match (%s != %s)" % (cert_hash, cert_pin))
             return sock_wrapped
         else:
             return sock
@@ -102,17 +115,22 @@ class CryptConnectionManager:
             self.cacert_pem,
             self.openssl_env["OPENSSL_CONF"],
         )
+        cmd = "%s req -new -newkey rsa:2048 -days 3650 -nodes -x509 -config %s -subj %s -keyout %s -out %s -batch" % cmd_params
+        self.log.debug("Generating RSA CAcert and CAkey PEM files...")
+        self.log.debug("Running: %s" % cmd)
         proc = subprocess.Popen(
-            cmd.encode(sys.getfilesystemencoding()),
-            shell=True, stderr=subprocess.STDOUT, stdout=subprocess.PIPE, env=self.openssl_env
+            cmd, shell=True, stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE, env=self.openssl_env
         )
-        back = proc.stdout.read().strip()
+        back = proc.stdout.read().strip().decode(errors="replace").replace("\r", "")
         proc.wait()
         logging.debug("Generating RSA CAcert and CAkey PEM files...%s" % back)
 
         if not (os.path.isfile(self.cacert_pem) and os.path.isfile(self.cakey_pem)):
             logging.error("RSA ECC SSL CAcert generation failed, CAcert or CAkey files not exist.")
             return False
+        else:
+            self.log.debug("Result: %s" % back)
 
         # Generate certificate key and signing request
         cmd = "%s req -new -newkey rsa:2048 -keyout %s -out %s -subj %s -sha256 -nodes -batch -config %s" % helper.shellquote(
@@ -126,7 +144,7 @@ class CryptConnectionManager:
             cmd.encode(sys.getfilesystemencoding()),
             shell=True, stderr=subprocess.STDOUT, stdout=subprocess.PIPE, env=self.openssl_env
         )
-        back = proc.stdout.read().strip()
+        back = proc.stdout.read().strip().decode(errors="replace").replace("\r", "")
         proc.wait()
         logging.debug("Generating certificate key and signing request...%s" % back)
 
@@ -143,7 +161,7 @@ class CryptConnectionManager:
             cmd.encode(sys.getfilesystemencoding()),
             shell=True, stderr=subprocess.STDOUT, stdout=subprocess.PIPE, env=self.openssl_env
         )
-        back = proc.stdout.read().strip()
+        back = proc.stdout.read().strip().decode(errors="replace").replace("\r", "")
         proc.wait()
         logging.debug("Generating RSA cert...%s" % back)
 

@@ -1,11 +1,16 @@
 import re
-import cgi
+import html
 import copy
+import os
 
 from Plugin import PluginManager
 from Translate import Translate
+
+
+plugin_dir = os.path.dirname(__file__)
+
 if "_" not in locals():
-    _ = Translate("plugins/Cors/languages/")
+    _ = Translate(plugin_dir + "/languages/")
 
 
 def getCorsPath(site, inner_path):
@@ -27,7 +32,11 @@ class UiWebsocketPlugin(object):
         if super(UiWebsocketPlugin, self).hasSitePermission(address, cmd=cmd):
             return True
 
-        if not "Cors:%s" % address in self.site.settings["permissions"] or cmd not in ["fileGet", "fileList", "dirList", "fileRules", "optionalFileInfo", "fileQuery", "dbQuery", "userGetSettings", "siteInfo"]:
+        allowed_commands = [
+            "fileGet", "fileList", "dirList", "fileRules", "optionalFileInfo",
+            "fileQuery", "dbQuery", "userGetSettings", "siteInfo"
+        ]
+        if not "Cors:%s" % address in self.site.settings["permissions"] or cmd not in allowed_commands:
             return False
         else:
             return True
@@ -78,8 +87,8 @@ class UiWebsocketPlugin(object):
 
         self.cmd(
             "confirm",
-            [_["This site requests <b>read</b> permission to: <b>%s</b>"] % cgi.escape(site_name), button_title],
-            lambda (res): self.cbCorsPermission(to, address)
+            [_["This site requests <b>read</b> permission to: <b>%s</b>"] % html.escape(site_name), button_title],
+            lambda res: self.cbCorsPermission(to, address)
         )
 
     def cbCorsPermission(self, to, address):
@@ -99,6 +108,6 @@ class UiRequestPlugin(object):
         site = self.server.sites[path_parts["address"]]
         try:
             path_parts["address"], path_parts["inner_path"] = getCorsPath(site, path_parts["inner_path"])
-        except:
+        except Exception:
             return None
         return path_parts

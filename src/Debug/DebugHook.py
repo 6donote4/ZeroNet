@@ -6,6 +6,7 @@ import gevent
 import gevent.hub
 
 from Config import config
+from . import Debug
 
 last_error = None
 
@@ -69,17 +70,28 @@ else:
             sys.excepthook(exc_info[0], exc_info[1], exc_info[2])
 
     gevent.Greenlet = gevent.greenlet.Greenlet = ErrorhookedGreenlet
-    reload(gevent)
+    importlib.reload(gevent)
 
-def handleGreenletError(self, context, type, value, tb):
+def handleGreenletError(context, type, value, tb):
+    if context.__class__ is tuple and context[0].__class__.__name__ == "ThreadPool":
+        # Exceptions in ThreadPool will be handled in the main Thread
+        return None
+
     if isinstance(value, str):
         # Cython can raise errors where the value is a plain string
         # e.g., AttributeError, "_semaphore.Semaphore has no attr", <traceback>
         value = type(value)
-    if not issubclass(type, self.NOT_ERROR):
+
+    if not issubclass(type, gevent.get_hub().NOT_ERROR):
         sys.excepthook(type, value, tb)
 
-gevent.hub.Hub.handle_error = handleGreenletError
+gevent.get_hub().handle_error = handleGreenletError
+
+try:
+    signal.signal(signal.SIGTERM, lambda signum, stack_frame: shutdown("SIGTERM"))
+except Exception as err:
+    logging.debug("Error setting up SIGTERM watcher: %s" % err)
+
 
 try:
     signal.signal(signal.SIGTERM, lambda signum, stack_frame: shutdown("SIGTERM"))
@@ -91,18 +103,18 @@ if __name__ == "__main__":
     import time
     from gevent import monkey
     monkey.patch_all(thread=False, ssl=False)
-    import Debug
+    from . import Debug
 
     def sleeper(num):
-        print "started", num
+        print("started", num)
         time.sleep(3)
         raise Exception("Error")
-        print "stopped", num
+        print("stopped", num)
     thread1 = gevent.spawn(sleeper, 1)
     thread2 = gevent.spawn(sleeper, 2)
     time.sleep(1)
-    print "killing..."
+    print("killing...")
     thread1.kill(exception=Debug.Notify("Worker stopped"))
     #thread2.throw(Debug.Notify("Throw"))
-    print "killed"
+    print("killed")
     gevent.joinall([thread1,thread2])

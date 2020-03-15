@@ -4,7 +4,7 @@ import logging
 import time
 
 # ZeroNet Modules
-from User import User
+from .User import User
 from Plugin import PluginManager
 from Config import config
 
@@ -24,7 +24,13 @@ class UserManager(object):
         added = 0
         s = time.time()
         # Load new users
-        for master_address, data in json.load(open("%s/users.json" % config.data_dir)).items():
+        try:
+            json_path = "%s/users.json" % config.data_dir
+            data = json.load(open(json_path))
+        except Exception as err:
+            raise Exception("Unable to load %s: %s" % (json_path, err))
+
+        for master_address, data in list(data.items()):
             if master_address not in self.users:
                 user = User(master_address, data=data)
                 self.users[master_address] = user
@@ -32,7 +38,7 @@ class UserManager(object):
             user_found.append(master_address)
 
         # Remove deleted adresses
-        for master_address in self.users.keys():
+        for master_address in list(self.users.keys()):
             if master_address not in user_found:
                 del(self.users[master_address])
                 self.log.debug("Removed user: %s" % master_address)
@@ -63,7 +69,7 @@ class UserManager(object):
     def get(self, master_address=None):
         users = self.list()
         if users:
-            return users.values()[0]  # Single user mode, always return the first
+            return list(users.values())[0]  # Single user mode, always return the first
         else:
             return None
 

@@ -3,6 +3,7 @@ import subprocess
 import re
 import logging
 import time
+import functools
 
 from Config import config
 from util import helper
@@ -18,9 +19,9 @@ def findfiles(path, find_ext):
         elif f2 == "":
             return -1
         else:
-            return cmp(f1.lower(), f2.lower())
+            return helper.cmp(f1.lower(), f2.lower())
 
-    for root, dirs, files in sorted(os.walk(path, topdown=False), cmp=sorter):
+    for root, dirs, files in sorted(os.walk(path, topdown=False), key=functools.cmp_to_key(sorter)):
         for file in sorted(files):
             file_path = root + "/" + file
             file_ext = file.split(".")[-1]
@@ -44,6 +45,7 @@ def findCoffeescriptCompiler():
 
 # Generates: all.js: merge *.js, compile coffeescript, all.css: merge *.css, vendor prefix features
 def merge(merged_path):
+    merged_path = merged_path.replace("\\", "/")
     merge_dir = os.path.dirname(merged_path)
     s = time.time()
     ext = merged_path.split(".")[-1]
@@ -65,19 +67,21 @@ def merge(merged_path):
     if not changed:
         return  # Assets not changed, nothing to do
 
+    old_parts = {}
     if os.path.isfile(merged_path):  # Find old parts to avoid unncessary recompile
-        merged_old = open(merged_path, "rb").read().decode("utf8")
-        old_parts = {}
-        for match in re.findall(r"(/\* ---- (.*?) ---- \*/(.*?)(?=/\* ----|$))", merged_old, re.DOTALL):
-            old_parts[match[1]] = match[2].strip("\n\r")
+        merged_old = open(merged_path, "rb").read()
+        for match in re.findall(rb"(/\* ---- (.*?) ---- \*/(.*?)(?=/\* ----|$))", merged_old, re.DOTALL):
+            old_parts[match[1].decode()] = match[2].strip(b"\n\r")
 
+    logging.debug("Merging %s (changed: %s, old parts: %s)" % (merged_path, changed, len(old_parts)))
     # Merge files
     parts = []
     s_total = time.time()
     for file_path in findfiles(merge_dir, find_ext):
-        parts.append("\n\n/* ---- %s ---- */\n\n" % file_path.replace(config.data_dir, ""))
+        file_relative_path = file_path.replace(merge_dir + "/", "")
+        parts.append(b"\n/* ---- %s ---- */\n\n" % file_relative_path.encode("utf8"))
         if file_path.endswith(".coffee"):  # Compile coffee script
-            if file_path in changed or file_path.replace(config.data_dir, "") not in old_parts:  # Only recompile if changed or its not compiled before
+            if file_path in changed or file_relative_path not in old_parts:  # Only recompile if changed or its not compiled before
                 if config.coffeescript_compiler is None:
                     config.coffeescript_compiler = findCoffeescriptCompiler()
                 if not config.coffeescript_compiler:
@@ -88,38 +92,39 @@ def merge(merged_path):
                 file_path_escaped = helper.shellquote(file_path.replace("/", os.path.sep))
 
                 if "%s" in config.coffeescript_compiler:  # Replace %s with coffeescript file
-                    command = config.coffeescript_compiler % file_path_escaped
+                    command = config.coffeescript_compiler.replace("%s", file_path_escaped)
                 else:  # Put coffeescript file to end
                     command = config.coffeescript_compiler + " " + file_path_escaped
 
                 # Start compiling
                 s = time.time()
                 compiler = subprocess.Popen(command, shell=True, stderr=subprocess.STDOUT, stdout=subprocess.PIPE)
-                out = compiler.stdout.read().decode("utf8")
+                out = compiler.stdout.read()
                 compiler.wait()
                 logging.debug("Running: %s (Done in %.2fs)" % (command, time.time() - s))
 
                 # Check errors
-                if out and out.startswith("("):  # No error found
+                if out and out.startswith(b"("):  # No error found
                     parts.append(out)
                 else:  # Put error message in place of source code
                     error = out
-                    logging.error("%s Compile error: %s" % (file_path, error))
+                    logging.error("%s Compile error: %s" % (file_relative_path, error))
+                    error_escaped = re.escape(error).replace(b"\n", b"\\n").replace(br"\\n", br"\n")
                     parts.append(
-                        "alert('%s compile error: %s');" %
-                        (file_path, re.escape(error).replace("\n", "\\n").replace(r"\\n", r"\n"))
+                        b"alert('%s compile error: %s');" %
+                        (file_relative_path.encode(), error_escaped)
                     )
             else:  # Not changed use the old_part
-                parts.append(old_parts[file_path.replace(config.data_dir, "")])
+                parts.append(old_parts[file_relative_path])
         else:  # Add to parts
-            parts.append(open(file_path).read().decode("utf8"))
+            parts.append(open(file_path, "rb").read())
 
-    merged = u"\n".join(parts)
+    merged = b"\n".join(parts)
     if ext == "css":  # Vendor prefix css
         from lib.cssvendor import cssvendor
         merged = cssvendor.prefix(merged)
-    merged = merged.replace("\r", "")
-    open(merged_path, "wb").write(merged.encode("utf8"))
+    merged = merged.replace(b"\r", b"")
+    open(merged_path, "wb").write(merged)
     logging.debug("Merged %s (%.2fs)" % (merged_path, time.time() - s_total))
 
 

@@ -33,6 +33,7 @@ class Wrapper
 		@address = null
 		@opener_tested = false
 		@announcer_line = null
+		@web_notifications = {}
 
 		@allowed_event_constructors = [window.MouseEvent, window.KeyboardEvent, window.PointerEvent] # Allowed event constructors
 
@@ -62,6 +63,9 @@ class Wrapper
 	# Incoming message from UiServer websocket
 	onMessageWebsocket: (e) =>
 		message = JSON.parse(e.data)
+		@handleMessageWebsocket(message)
+
+	handleMessageWebsocket: (message) =>
 		cmd = message.cmd
 		if cmd == "response"
 			if @ws.waiting_cb[message.to]? # We are waiting for response
@@ -95,6 +99,7 @@ class Wrapper
 		else if cmd == "error"
 			@notifications.add("notification-#{message.id}", "error", message.params, 0)
 		else if cmd == "updating" # Close connection
+			@log "Updating: Closing websocket"
 			@ws.ws.close()
 			@ws.onCloseWebsocket(null, 4000)
 		else if cmd == "redirect"
@@ -189,6 +194,10 @@ class Wrapper
 			@actionPermissionAdd(message)
 		else if cmd == "wrapperRequestFullscreen"
 			@actionRequestFullscreen()
+		else if cmd == "wrapperWebNotification"
+			@actionWebNotification(message)
+		else if cmd == "wrapperCloseWebNotification"
+			@actionCloseWebNotification(message)
 		else # Send to websocket
 			if message.id < 1000000
 				if message.cmd == "fileWrite" and not @modified_panel_updater_timer and site_info?.settings?.own
@@ -234,6 +243,40 @@ class Wrapper
 		elem = document.getElementById("inner-iframe")
 		request_fullscreen = elem.requestFullScreen || elem.webkitRequestFullscreen || elem.mozRequestFullScreen || elem.msRequestFullScreen
 		request_fullscreen.call(elem)
+
+	actionWebNotification: (message) ->
+		$.when(@event_site_info).done =>
+			# Check that the wrapper may send notifications
+			if Notification.permission == "granted"
+				@displayWebNotification message
+			else if Notification.permission == "denied"
+				res = {"error": "Web notifications are disabled by the user"}
+				@sendInner {"cmd": "response", "to": message.id, "result": res}
+			else
+				Notification.requestPermission().then (permission) =>
+					if permission == "granted"
+						@displayWebNotification message
+
+	actionCloseWebNotification: (message) ->
+		$.when(@event_site_info).done =>
+			id = message.params[0]
+			@web_notifications[id].close()
+
+	displayWebNotification: (message) ->
+		title = message.params[0]
+		id = message.params[1]
+		options = message.params[2]
+		notification = new Notification(title, options)
+		@web_notifications[id] = notification
+		notification.onshow = () =>
+			@sendInner {"cmd": "response", "to": message.id, "result": "ok"}
+		notification.onclick = (e) =>
+			if not options.focus_tab
+				e.preventDefault()
+			@sendInner {"cmd": "webNotificationClick", "params": {"id": id}}
+		notification.onclose = () =>
+			@sendInner {"cmd": "webNotificationClose", "params": {"id": id}}
+			delete @web_notifications[id]
 
 	actionPermissionAdd: (message) ->
 		permission = message.params
@@ -315,9 +358,8 @@ class Wrapper
 		@displayPrompt message.params[0], type, caption, placeholder, (res) =>
 			@sendInner {"cmd": "response", "to": message.id, "result": res} # Response to confirm
 
-	actionProgress: (message) ->
-		message.params = @toHtmlSafe(message.params) # Escape html
-		percent = Math.min(100, message.params[2])/100
+	displayProgress: (type, body, percent) ->
+		percent = Math.min(100, percent)/100
 		offset = 75-(percent*75)
 		circle = """
 			<div class="circle"><svg class="circle-svg" width="30" height="30" viewport="0 0 30 30" version="1.1" xmlns="http://www.w3.org/2000/svg">
@@ -325,22 +367,22 @@ class Wrapper
   				<circle r="12" cx="15" cy="15" fill="transparent" class="circle-fg" style="stroke-dashoffset: #{offset}"></circle>
 			</svg></div>
 		"""
-		body = "<span class='message'>"+message.params[1]+"</span>" + circle
-		elem = $(".notification-#{message.params[0]}")
+		body = "<span class='message'>"+body+"</span>" + circle
+		elem = $(".notification-#{type}")
 		if elem.length
 			width = $(".body .message", elem).outerWidth()
-			$(".body .message", elem).html(message.params[1])
+			$(".body .message", elem).html(body)
 			if $(".body .message", elem).css("width") == ""
 				$(".body .message", elem).css("width", width)
 			$(".body .circle-fg", elem).css("stroke-dashoffset", offset)
 		else
-			elem = @notifications.add(message.params[0], "progress", $(body))
+			elem = @notifications.add(type, "progress", $(body))
 		if percent > 0
 			$(".body .circle-bg", elem).css {"animation-play-state": "paused", "stroke-dasharray": "180px"}
 
 		if $(".notification-icon", elem).data("done")
 			return false
-		else if message.params[2] >= 100  # Done
+		else if percent >= 1  # Done
 			$(".circle-fg", elem).css("transition", "all 0.3s ease-in-out")
 			setTimeout (->
 				$(".notification-icon", elem).css {transform: "scale(1)", opacity: 1}
@@ -350,7 +392,7 @@ class Wrapper
 				@notifications.close elem
 			), 3000
 			$(".notification-icon", elem).data("done", true)
-		else if message.params[2] < 0  # Error
+		else if percent < 0  # Error
 			$(".body .circle-fg", elem).css("stroke", "#ec6f47").css("transition", "transition: all 0.3s ease-in-out")
 			setTimeout (=>
 				$(".notification-icon", elem).css {transform: "scale(1)", opacity: 1}
@@ -359,6 +401,10 @@ class Wrapper
 			), 300
 			$(".notification-icon", elem).data("done", true)
 
+
+	actionProgress: (message) ->
+		message.params = @toHtmlSafe(message.params) # Escape html
+		@displayProgress(message.params[0], message.params[1], message.params[2])
 
 	actionSetViewport: (message) ->
 		@log "actionSetViewport", message
@@ -371,11 +417,13 @@ class Wrapper
 		@reload(message.params[0])
 
 	reload: (url_post="") ->
+		@log "Reload"
+		current_url = window.location.toString().replace(/#.*/g, "")
 		if url_post
-			if window.location.toString().indexOf("?") > 0
-				window.location += "&"+url_post
+			if current_url.indexOf("?") > 0
+				window.location = current_url + "&" + url_post
 			else
-				window.location += "?"+url_post
+				window.location = current_url + "?" + url_post
 		else
 			window.location.reload()
 
@@ -445,6 +493,7 @@ class Wrapper
 
 	# Iframe loaded
 	onPageLoad: (e) =>
+		@log "onPageLoad"
 		@inner_loaded = true
 		if not @inner_ready then @sendInner {"cmd": "wrapperReady"} # Inner frame loaded before wrapper
 		#if not @site_error then @loading.hideScreen() # Hide loading screen
@@ -479,14 +528,11 @@ class Wrapper
 			@address = site_info.address
 			@setSiteInfo site_info
 
-			if site_info.settings.size > site_info.size_limit*1024*1024 # Site size too large and not displaying it yet
-				if @loading.screen_visible
-					@loading.showTooLarge(site_info)
-				else
-					@displayConfirm "Site is larger than allowed: #{(site_info.settings.size/1024/1024).toFixed(1)}MB/#{site_info.size_limit}MB", "Set limit to #{site_info.next_size_limit}MB", =>
-						@ws.cmd "siteSetLimit", [site_info.next_size_limit], (res) =>
-							if res == "ok"
-								@notifications.add("size_limit", "done", "Site storage limit modified!", 5000)
+			if site_info.settings.size > site_info.size_limit * 1024 * 1024 and not @loading.screen_visible  # Site size too large and not displaying it yet
+				@displayConfirm "Site is larger than allowed: #{(site_info.settings.size/1024/1024).toFixed(1)}MB/#{site_info.size_limit}MB", "Set limit to #{site_info.next_size_limit}MB", =>
+					@ws.cmd "siteSetLimit", [site_info.next_size_limit], (res) =>
+						if res == "ok"
+							@notifications.add("size_limit", "done", "Site storage limit modified!", 5000)
 
 			if site_info.content?.title?
 				window.document.title = site_info.content.title + " - ZeroNet"
@@ -506,8 +552,8 @@ class Wrapper
 					@loading.hideScreen()
 					if not @site_info then @reloadSiteInfo()
 					if site_info.content
-						window.document.title = site_info.content.title+" - ZeroNet"
-						@log "Required file done, setting title to", window.document.title
+						window.document.title = site_info.content.title + " - ZeroNet"
+						@log "Required file #{window.file_inner_path} done, setting title to", window.document.title
 					if not window.show_loadingscreen
 						@notifications.add("modified", "info", "New version of this page has just released.<br>Reload to see the modified content.")
 			# File failed downloading
@@ -537,11 +583,16 @@ class Wrapper
 							@notifications.add("size_limit", "done", "Site storage limit modified!", 5000)
 					return false
 
-		if @loading.screen_visible and @inner_loaded and site_info.settings.size < site_info.size_limit*1024*1024 and site_info.settings.size > 0 # Loading screen still visible, but inner loaded
+		if @loading.screen_visible and @inner_loaded and site_info.settings.size < site_info.size_limit * 1024 * 1024 and site_info.settings.size > 0 # Loading screen still visible, but inner loaded
+			@log "Loading screen visible, but inner loaded"
 			@loading.hideScreen()
 
 		if site_info?.settings?.own and site_info?.settings?.modified != @site_info?.settings?.modified
 			@updateModifiedPanel()
+
+		if @loading.screen_visible and site_info.settings.size > site_info.size_limit * 1024 * 1024
+			@log "Site too large"
+			@loading.showTooLarge(site_info)
 
 		@site_info = site_info
 		@event_site_info.resolve()
@@ -628,11 +679,13 @@ class Wrapper
 
 
 	setSizeLimit: (size_limit, reload=true) =>
+		@log "setSizeLimit: #{size_limit}, reload: #{reload}"
+		@inner_loaded = false  # Inner frame not loaded, just a 404 page displayed
 		@ws.cmd "siteSetLimit", [size_limit], (res) =>
 			if res != "ok"
 				return false
 			@loading.printLine res
-			@inner_loaded = false # Inner frame not loaded, just a 404 page displayed
+			@inner_loaded = false
 			if reload then @reloadIframe()
 		return false
 
@@ -653,7 +706,7 @@ if origin.indexOf("https:") == 0
 else
 	proto = { ws: 'ws', http: 'http' }
 
-ws_url = proto.ws + ":" + origin.replace(proto.http+":", "") + "/Websocket?wrapper_key=" + window.wrapper_key
+ws_url = proto.ws + ":" + origin.replace(proto.http+":", "") + "/ZeroNet-Internal/Websocket?wrapper_key=" + window.wrapper_key
 
 window.wrapper = new Wrapper(ws_url)
 

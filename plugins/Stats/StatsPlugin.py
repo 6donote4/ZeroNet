@@ -1,10 +1,14 @@
 import time
-import cgi
+import html
 import os
 import json
+from collections import OrderedDict
 
 from Plugin import PluginManager
 from Config import config
+from util import helper
+from Debug import Debug
+from Db import Db
 
 
 @PluginManager.registerTo("UiRequest")
@@ -23,7 +27,7 @@ class UiRequestPlugin(object):
             else:
                 formatted = format % val
             back.append("<td>%s</td>" % formatted)
-        return "<tr class='%s'>%s</tr>" % (class_name.encode("utf8"), "".join(back).encode("utf8"))
+        return "<tr class='%s'>%s</tr>" % (class_name, "".join(back))
 
     def getObjSize(self, obj, hpy=None):
         if hpy:
@@ -32,12 +36,13 @@ class UiRequestPlugin(object):
             return 0
 
     # /Stats entry point
+    @helper.encodeResponse
     def actionStats(self):
         import gc
         import sys
         from Ui import UiRequest
-        from Db import Db
         from Crypt import CryptConnection
+        import main
 
 
         hpy = None
@@ -51,10 +56,9 @@ class UiRequestPlugin(object):
 
         if "Multiuser" in PluginManager.plugin_manager.plugin_names and not config.multiuser_local:
             yield "This function is disabled on this proxy"
-            raise StopIteration
+            return
 
         s = time.time()
-        main = sys.modules["main"]
 
         # Style
         yield """
@@ -70,15 +74,16 @@ class UiRequestPlugin(object):
         yield "rev%s | " % config.rev
         yield "%s | " % main.file_server.ip_external_list
         yield "Port: %s | " % main.file_server.port
-        yield "IP Network: %s | " % main.file_server.supported_ip_types
+        yield "Network: %s | " % main.file_server.supported_ip_types
         yield "Opened: %s | " % main.file_server.port_opened
-        yield "Crypt: %s | " % CryptConnection.manager.crypt_supported
+        yield "Crypt: %s, TLSv1.3: %s | " % (CryptConnection.manager.crypt_supported, CryptConnection.ssl.HAS_TLSv1_3)
         yield "In: %.2fMB, Out: %.2fMB  | " % (
             float(main.file_server.bytes_recv) / 1024 / 1024,
             float(main.file_server.bytes_sent) / 1024 / 1024
         )
         yield "Peerid: %s  | " % main.file_server.peer_id
-        yield "Time correction: %.2fs" % main.file_server.getTimecorrection()
+        yield "Time: %.2fs | " % main.file_server.getTimecorrection()
+        yield "Blocks: %s" % Debug.num_block
 
         try:
             import psutil
@@ -125,10 +130,10 @@ class UiRequestPlugin(object):
                 ("since", connection.start_time),
                 ("%.3f", max(-1, connection.last_sent_time - connection.last_send_time)),
                 ("%.3f", connection.cpu_time),
-                ("%.0fkB", connection.bytes_sent / 1024),
-                ("%.0fkB", connection.bytes_recv / 1024),
+                ("%.0fk", connection.bytes_sent / 1024),
+                ("%.0fk", connection.bytes_recv / 1024),
                 ("<span title='Recv: %s'>%s</span>", (connection.last_cmd_recv, connection.last_cmd_sent)),
-                ("%s", connection.waiting_requests.keys()),
+                ("%s", list(connection.waiting_requests.keys())),
                 ("%s r%s", (connection.handshake.get("version"), connection.handshake.get("rev", "?"))),
                 ("%.2fs", time_correction),
                 ("%s", connection.sites)
@@ -138,7 +143,8 @@ class UiRequestPlugin(object):
         # Trackers
         yield "<br><br><b>Trackers:</b><br>"
         yield "<table class='trackers'><tr> <th>address</th> <th>request</th> <th>successive errors</th> <th>last_request</th></tr>"
-        for tracker_address, tracker_stat in sorted(sys.modules["Site.SiteAnnouncer"].global_stats.iteritems()):
+        from Site import SiteAnnouncer # importing at the top of the file breaks plugins
+        for tracker_address, tracker_stat in sorted(SiteAnnouncer.global_stats.items()):
             yield self.formatTableRow([
                 ("%s", tracker_address),
                 ("%s", tracker_stat["num_request"]),
@@ -151,7 +157,7 @@ class UiRequestPlugin(object):
             yield "<br><br><b>Shared trackers:</b><br>"
             yield "<table class='trackers'><tr> <th>address</th> <th>added</th> <th>found</th> <th>latency</th> <th>successive errors</th> <th>last_success</th></tr>"
             from AnnounceShare import AnnounceSharePlugin
-            for tracker_address, tracker_stat in sorted(AnnounceSharePlugin.tracker_storage.getTrackers().iteritems()):
+            for tracker_address, tracker_stat in sorted(AnnounceSharePlugin.tracker_storage.getTrackers().items()):
                 yield self.formatTableRow([
                     ("%s", tracker_address),
                     ("%.0f min ago", min(999, (time.time() - tracker_stat["time_added"]) / 60)),
@@ -163,20 +169,20 @@ class UiRequestPlugin(object):
             yield "</table>"
 
         # Tor hidden services
-        yield "<br><br><b>Tor hidden services (status: %s):</b><br>" % main.file_server.tor_manager.status.encode("utf8")
-        for site_address, onion in main.file_server.tor_manager.site_onions.items():
-            yield "- %-34s: %s<br>" % (site_address, onion.encode("utf8"))
+        yield "<br><br><b>Tor hidden services (status: %s):</b><br>" % main.file_server.tor_manager.status
+        for site_address, onion in list(main.file_server.tor_manager.site_onions.items()):
+            yield "- %-34s: %s<br>" % (site_address, onion)
 
         # Db
         yield "<br><br><b>Db</b>:<br>"
-        for db in sys.modules["Db.Db"].opened_dbs:
+        for db in Db.opened_dbs:
             tables = [row["name"] for row in db.execute("SELECT name FROM sqlite_master WHERE type = 'table'").fetchall()]
             table_rows = {}
             for table in tables:
                 table_rows[table] = db.execute("SELECT COUNT(*) AS c FROM %s" % table).fetchone()["c"]
             db_size = os.path.getsize(db.db_path) / 1024.0 / 1024.0
             yield "- %.3fs: %s %.3fMB, table rows: %s<br>" % (
-                time.time() - db.last_query_time, db.db_path.encode("utf8"), db_size, json.dumps(table_rows, sort_keys=True)
+                time.time() - db.last_query_time, db.db_path, db_size, json.dumps(table_rows, sort_keys=True)
             )
 
 
@@ -184,27 +190,27 @@ class UiRequestPlugin(object):
         yield "<br><br><b>Sites</b>:"
         yield "<table>"
         yield "<tr><th>address</th> <th>connected</th> <th title='connected/good/total'>peers</th> <th>content.json</th> <th>out</th> <th>in</th>  </tr>"
-        for site in sorted(self.server.sites.values(), lambda a, b: cmp(a.address,b.address)):
+        for site in list(self.server.sites.values()):
             yield self.formatTableRow([
                 (
                     """<a href='#' onclick='document.getElementById("peers_%s").style.display="initial"; return false'>%s</a>""",
                     (site.address, site.address)
                 ),
-                ("%s", [peer.connection.id for peer in site.peers.values() if peer.connection and peer.connection.connected]),
+                ("%s", [peer.connection.id for peer in list(site.peers.values()) if peer.connection and peer.connection.connected]),
                 ("%s/%s/%s", (
-                    len([peer for peer in site.peers.values() if peer.connection and peer.connection.connected]),
+                    len([peer for peer in list(site.peers.values()) if peer.connection and peer.connection.connected]),
                     len(site.getConnectablePeers(100)),
                     len(site.peers)
                 )),
                 ("%s (loaded: %s)", (
                     len(site.content_manager.contents),
-                    len([key for key, val in dict(site.content_manager.contents).iteritems() if val])
+                    len([key for key, val in dict(site.content_manager.contents).items() if val])
                 )),
-                ("%.0fkB", site.settings.get("bytes_sent", 0) / 1024),
-                ("%.0fkB", site.settings.get("bytes_recv", 0) / 1024),
+                ("%.0fk", site.settings.get("bytes_sent", 0) / 1024),
+                ("%.0fk", site.settings.get("bytes_recv", 0) / 1024),
             ], "serving-%s" % site.settings["serving"])
             yield "<tr><td id='peers_%s' style='display: none; white-space: pre' colspan=6>" % site.address
-            for key, peer in site.peers.items():
+            for key, peer in list(site.peers.items()):
                 if peer.time_found:
                     time_found = int(time.time() - peer.time_found) / 60
                 else:
@@ -216,27 +222,27 @@ class UiRequestPlugin(object):
                 if site.content_manager.has_optional_files:
                     yield "Optional files: %4s " % len(peer.hashfield)
                 time_added = (time.time() - peer.time_added) / (60 * 60 * 24)
-                yield "(#%4s, rep: %2s, err: %s, found: %3s min, add: %.1f day) %30s -<br>" % (connection_id, peer.reputation, peer.connection_error, time_found, time_added, key)
+                yield "(#%4s, rep: %2s, err: %s, found: %.1fs min, add: %.1f day) %30s -<br>" % (connection_id, peer.reputation, peer.connection_error, time_found, time_added, key)
             yield "<br></td></tr>"
         yield "</table>"
 
         # Big files
         yield "<br><br><b>Big files</b>:<br>"
-        for site in self.server.sites.values():
+        for site in list(self.server.sites.values()):
             if not site.settings.get("has_bigfile"):
                 continue
             bigfiles = {}
             yield """<a href="#" onclick='document.getElementById("bigfiles_%s").style.display="initial"; return false'>%s</a><br>""" % (site.address, site.address)
-            for peer in site.peers.values():
+            for peer in list(site.peers.values()):
                 if not peer.time_piecefields_updated:
                     continue
-                for sha512, piecefield in peer.piecefields.iteritems():
+                for sha512, piecefield in peer.piecefields.items():
                     if sha512 not in bigfiles:
                         bigfiles[sha512] = []
                     bigfiles[sha512].append(peer)
 
             yield "<div id='bigfiles_%s' style='display: none'>" % site.address
-            for sha512, peers in bigfiles.iteritems():
+            for sha512, peers in bigfiles.items():
                 yield "<br> - " + sha512 + " (hash id: %s)<br>" % site.content_manager.hashfield.getHashId(sha512)
                 yield "<table>"
                 for peer in peers:
@@ -248,7 +254,7 @@ class UiRequestPlugin(object):
         yield "<div style='float: left'>"
         yield "<br><br><b>Sent commands</b>:<br>"
         yield "<table>"
-        for stat_key, stat in sorted(main.file_server.stat_sent.items(), lambda a, b: cmp(a[1]["bytes"], b[1]["bytes"]), reverse=True):
+        for stat_key, stat in sorted(main.file_server.stat_sent.items(), key=lambda i: i[1]["bytes"], reverse=True):
             yield "<tr><td>%s</td><td style='white-space: nowrap'>x %s =</td><td>%.0fkB</td></tr>" % (stat_key, stat["num"], stat["bytes"] / 1024)
         yield "</table>"
         yield "</div>"
@@ -256,7 +262,7 @@ class UiRequestPlugin(object):
         yield "<div style='float: left; margin-left: 20%; max-width: 50%'>"
         yield "<br><br><b>Received commands</b>:<br>"
         yield "<table>"
-        for stat_key, stat in sorted(main.file_server.stat_recv.items(), lambda a, b: cmp(a[1]["bytes"], b[1]["bytes"]), reverse=True):
+        for stat_key, stat in sorted(main.file_server.stat_recv.items(), key=lambda i: i[1]["bytes"], reverse=True):
             yield "<tr><td>%s</td><td style='white-space: nowrap'>x %s =</td><td>%.0fkB</td></tr>" % (stat_key, stat["num"], stat["bytes"] / 1024)
         yield "</table>"
         yield "</div>"
@@ -264,7 +270,7 @@ class UiRequestPlugin(object):
 
         # No more if not in debug mode
         if not config.debug:
-            raise StopIteration
+            return
 
         # Object types
 
@@ -278,12 +284,12 @@ class UiRequestPlugin(object):
 
         yield "<br><br><b>Objects in memory (types: %s, total: %s, %.2fkb):</b><br>" % (
             len(obj_count),
-            sum([stat[0] for stat in obj_count.values()]),
-            sum([stat[1] for stat in obj_count.values()])
+            sum([stat[0] for stat in list(obj_count.values())]),
+            sum([stat[1] for stat in list(obj_count.values())])
         )
 
-        for obj, stat in sorted(obj_count.items(), key=lambda x: x[1][0], reverse=True):  # Sorted by count
-            yield " - %.1fkb = %s x <a href=\"/Listobj?type=%s\">%s</a><br>" % (stat[1], stat[0], obj, cgi.escape(obj))
+        for obj, stat in sorted(list(obj_count.items()), key=lambda x: x[1][0], reverse=True):  # Sorted by count
+            yield " - %.1fkb = %s x <a href=\"/Listobj?type=%s\">%s</a><br>" % (stat[1], stat[0], obj, html.escape(obj))
 
         # Classes
 
@@ -300,74 +306,75 @@ class UiRequestPlugin(object):
 
         yield "<br><br><b>Classes in memory (types: %s, total: %s, %.2fkb):</b><br>" % (
             len(class_count),
-            sum([stat[0] for stat in class_count.values()]),
-            sum([stat[1] for stat in class_count.values()])
+            sum([stat[0] for stat in list(class_count.values())]),
+            sum([stat[1] for stat in list(class_count.values())])
         )
 
-        for obj, stat in sorted(class_count.items(), key=lambda x: x[1][0], reverse=True):  # Sorted by count
-            yield " - %.1fkb = %s x <a href=\"/Dumpobj?class=%s\">%s</a><br>" % (stat[1], stat[0], obj, cgi.escape(obj))
+        for obj, stat in sorted(list(class_count.items()), key=lambda x: x[1][0], reverse=True):  # Sorted by count
+            yield " - %.1fkb = %s x <a href=\"/Dumpobj?class=%s\">%s</a><br>" % (stat[1], stat[0], obj, html.escape(obj))
 
         from greenlet import greenlet
         objs = [obj for obj in gc.get_objects() if isinstance(obj, greenlet)]
         yield "<br>Greenlets (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj).encode("utf8")))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
         from Worker import Worker
         objs = [obj for obj in gc.get_objects() if isinstance(obj, Worker)]
         yield "<br>Workers (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
         from Connection import Connection
         objs = [obj for obj in gc.get_objects() if isinstance(obj, Connection)]
         yield "<br>Connections (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
         from socket import socket
         objs = [obj for obj in gc.get_objects() if isinstance(obj, socket)]
         yield "<br>Sockets (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
         from msgpack import Unpacker
         objs = [obj for obj in gc.get_objects() if isinstance(obj, Unpacker)]
         yield "<br>Msgpack unpacker (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
-        from Site import Site
+        from Site.Site import Site
         objs = [obj for obj in gc.get_objects() if isinstance(obj, Site)]
         yield "<br>Sites (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
         objs = [obj for obj in gc.get_objects() if isinstance(obj, self.server.log.__class__)]
         yield "<br>Loggers (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj.name)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj.name)))
 
         objs = [obj for obj in gc.get_objects() if isinstance(obj, UiRequest)]
         yield "<br>UiRequests (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
         from Peer import Peer
         objs = [obj for obj in gc.get_objects() if isinstance(obj, Peer)]
         yield "<br>Peers (%s):<br>" % len(objs)
         for obj in objs:
-            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), cgi.escape(repr(obj)))
+            yield " - %.1fkb: %s<br>" % (self.getObjSize(obj, hpy), html.escape(repr(obj)))
 
-        objs = [(key, val) for key, val in sys.modules.iteritems() if val is not None]
+        objs = [(key, val) for key, val in sys.modules.items() if val is not None]
         objs.sort()
         yield "<br>Modules (%s):<br>" % len(objs)
         for module_name, module in objs:
-            yield " - %.3fkb: %s %s<br>" % (self.getObjSize(module, hpy), module_name, cgi.escape(repr(module)))
+            yield " - %.3fkb: %s %s<br>" % (self.getObjSize(module, hpy), module_name, html.escape(repr(module)))
 
         gc.collect()  # Implicit grabage collection
         yield "Done in %.1f" % (time.time() - s)
 
+    @helper.encodeResponse
     def actionDumpobj(self):
 
         import gc
@@ -377,12 +384,12 @@ class UiRequestPlugin(object):
 
         if "Multiuser" in PluginManager.plugin_manager.plugin_names and not config.multiuser_local:
             yield "This function is disabled on this proxy"
-            raise StopIteration
+            return
 
         # No more if not in debug mode
         if not config.debug:
             yield "Not in debug mode"
-            raise StopIteration
+            return
 
         class_filter = self.get.get("class")
 
@@ -398,13 +405,14 @@ class UiRequestPlugin(object):
             obj_type = str(type(obj))
             if obj_type != "<type 'instance'>" or obj.__class__.__name__ != class_filter:
                 continue
-            yield "%.1fkb %s... " % (float(sys.getsizeof(obj)) / 1024, cgi.escape(str(obj)))
+            yield "%.1fkb %s... " % (float(sys.getsizeof(obj)) / 1024, html.escape(str(obj)))
             for attr in dir(obj):
-                yield "- %s: %s<br>" % (attr, cgi.escape(str(getattr(obj, attr))))
+                yield "- %s: %s<br>" % (attr, html.escape(str(getattr(obj, attr))))
             yield "<br>"
 
         gc.collect()  # Implicit grabage collection
 
+    @helper.encodeResponse
     def actionListobj(self):
 
         import gc
@@ -414,12 +422,12 @@ class UiRequestPlugin(object):
 
         if "Multiuser" in PluginManager.plugin_manager.plugin_names and not config.multiuser_local:
             yield "This function is disabled on this proxy"
-            raise StopIteration
+            return
 
         # No more if not in debug mode
         if not config.debug:
             yield "Not in debug mode"
-            raise StopIteration
+            return
 
         type_filter = self.get.get("type")
 
@@ -430,7 +438,7 @@ class UiRequestPlugin(object):
         </style>
         """
 
-        yield "Listing all %s objects in memory...<br>" % cgi.escape(type_filter)
+        yield "Listing all %s objects in memory...<br>" % html.escape(type_filter)
 
         ref_count = {}
         objs = gc.get_objects()
@@ -447,7 +455,7 @@ class UiRequestPlugin(object):
                 continue
             try:
                 yield "%.1fkb <span title=\"%s\">%s</span>... " % (
-                    float(sys.getsizeof(obj)) / 1024, cgi.escape(str(obj)), cgi.escape(str(obj)[0:100].ljust(100))
+                    float(sys.getsizeof(obj)) / 1024, html.escape(str(obj)), html.escape(str(obj)[0:100].ljust(100))
                 )
             except:
                 continue
@@ -456,7 +464,7 @@ class UiRequestPlugin(object):
                 if "object at" in str(ref) or len(str(ref)) > 100:
                     yield str(ref.__class__.__name__)
                 else:
-                    yield str(ref.__class__.__name__) + ":" + cgi.escape(str(ref))
+                    yield str(ref.__class__.__name__) + ":" + html.escape(str(ref))
                 yield "] "
                 ref_type = ref.__class__.__name__
                 if ref_type not in ref_count:
@@ -465,381 +473,14 @@ class UiRequestPlugin(object):
                 ref_count[ref_type][1] += float(sys.getsizeof(obj)) / 1024  # Size
             yield "<br>"
 
-        yield "<br>Object referrer (total: %s, %.2fkb):<br>" % (len(ref_count), sum([stat[1] for stat in ref_count.values()]))
+        yield "<br>Object referrer (total: %s, %.2fkb):<br>" % (len(ref_count), sum([stat[1] for stat in list(ref_count.values())]))
 
-        for obj, stat in sorted(ref_count.items(), key=lambda x: x[1][0], reverse=True)[0:30]:  # Sorted by count
-            yield " - %.1fkb = %s x %s<br>" % (stat[1], stat[0], cgi.escape(str(obj)))
-
-        gc.collect()  # Implicit grabage collection
-
-    def actionBenchmark(self):
-        import sys
-        import gc
-        from contextlib import contextmanager
-
-        output = self.sendHeader()
-
-        if "Multiuser" in PluginManager.plugin_manager.plugin_names and not config.multiuser_local:
-            yield "This function is disabled on this proxy"
-            raise StopIteration
-
-        @contextmanager
-        def benchmark(name, standard):
-            s = time.time()
-            output("- %s" % name)
-            try:
-                yield 1
-            except Exception, err:
-                output("<br><b>! Error: %s</b><br>" % err)
-            taken = time.time() - s
-            if taken > 0:
-                multipler = standard / taken
-            else:
-                multipler = 99
-            if multipler < 0.3:
-                speed = "Sloooow"
-            elif multipler < 0.5:
-                speed = "Ehh"
-            elif multipler < 0.8:
-                speed = "Goodish"
-            elif multipler < 1.2:
-                speed = "OK"
-            elif multipler < 1.7:
-                speed = "Fine"
-            elif multipler < 2.5:
-                speed = "Fast"
-            elif multipler < 3.5:
-                speed = "WOW"
-            else:
-                speed = "Insane!!"
-            output("%.3fs [x%.2f: %s]<br>" % (taken, multipler, speed))
-            time.sleep(0.01)
-
-        yield """
-        <style>
-         * { font-family: monospace }
-         table * { text-align: right; padding: 0px 10px }
-        </style>
-        """
-
-        yield "Benchmarking ZeroNet %s (rev%s) Python %s on: %s...<br>" % (config.version, config.rev, sys.version, sys.platform)
-
-        t = time.time()
-
-        # CryptBitcoin
-        yield "<br>CryptBitcoin:<br>"
-        from Crypt import CryptBitcoin
-
-        # seed = CryptBitcoin.newSeed()
-        # yield "- Seed: %s<br>" % seed
-        seed = "e180efa477c63b0f2757eac7b1cce781877177fe0966be62754ffd4c8592ce38"
-
-        with benchmark("hdPrivatekey x 10", 0.7):
-            for i in range(10):
-                privatekey = CryptBitcoin.hdPrivatekey(seed, i * 10)
-                yield "."
-            valid = "5JsunC55XGVqFQj5kPGK4MWgTL26jKbnPhjnmchSNPo75XXCwtk"
-            assert privatekey == valid, "%s != %s" % (privatekey, valid)
-
-        data = "Hello" * 1024  # 5k
-        with benchmark("sign x 10", 0.35):
-            for i in range(10):
-                yield "."
-                sign = CryptBitcoin.sign(data, privatekey)
-            valid = "G1GXaDauZ8vX/N9Jn+MRiGm9h+I94zUhDnNYFaqMGuOiBHB+kp4cRPZOL7l1yqK5BHa6J+W97bMjvTXtxzljp6w="
-            assert sign == valid, "%s != %s" % (sign, valid)
-
-        address = CryptBitcoin.privatekeyToAddress(privatekey)
-        if CryptBitcoin.opensslVerify:  # Openssl avalible
-            with benchmark("openssl verify x 100", 0.37):
-                for i in range(100):
-                    if i % 10 == 0:
-                        yield "."
-                    ok = CryptBitcoin.verify(data, address, sign)
-                assert ok, "does not verify from %s" % address
-        else:
-            yield " - openssl verify x 100...not avalible :(<br>"
-
-        openssl_verify_bk = CryptBitcoin.opensslVerify  # Emulate openssl not found in any way
-        CryptBitcoin.opensslVerify = None
-        with benchmark("pure-python verify x 10", 1.6):
-            for i in range(10):
-                yield "."
-                ok = CryptBitcoin.verify(data, address, sign)
-            assert ok, "does not verify from %s" % address
-        CryptBitcoin.opensslVerify = openssl_verify_bk
-
-        # CryptHash
-        yield "<br>CryptHash:<br>"
-        from Crypt import CryptHash
-        from cStringIO import StringIO
-
-        data = StringIO("Hello" * 1024 * 1024)  # 5m
-        with benchmark("sha256 5M x 10", 0.6):
-            for i in range(10):
-                data.seek(0)
-                hash = CryptHash.sha256sum(data)
-                yield "."
-            valid = "8cd629d9d6aff6590da8b80782a5046d2673d5917b99d5603c3dcb4005c45ffa"
-            assert hash == valid, "%s != %s" % (hash, valid)
-
-        data = StringIO("Hello" * 1024 * 1024)  # 5m
-        with benchmark("sha512 5M x 10", 0.6):
-            for i in range(10):
-                data.seek(0)
-                hash = CryptHash.sha512sum(data)
-                yield "."
-            valid = "9ca7e855d430964d5b55b114e95c6bbb114a6d478f6485df93044d87b108904d"
-            assert hash == valid, "%s != %s" % (hash, valid)
-
-        with benchmark("os.urandom(256) x 1000", 0.0065):
-            for i in range(10):
-                for y in range(100):
-                    data = os.urandom(256)
-                yield "."
-
-        # Msgpack
-        import msgpack
-        yield "<br>Msgpack: (version: %s)<br>" % ".".join(map(str, msgpack.version))
-        binary = 'fqv\xf0\x1a"e\x10,\xbe\x9cT\x9e(\xa5]u\x072C\x8c\x15\xa2\xa8\x93Sw)\x19\x02\xdd\t\xfb\xf67\x88\xd9\xee\x86\xa1\xe4\xb6,\xc6\x14\xbb\xd7$z\x1d\xb2\xda\x85\xf5\xa0\x97^\x01*\xaf\xd3\xb0!\xb7\x9d\xea\x89\xbbh8\xa1"\xa7]e(@\xa2\xa5g\xb7[\xae\x8eE\xc2\x9fL\xb6s\x19\x19\r\xc8\x04S\xd0N\xe4]?/\x01\xea\xf6\xec\xd1\xb3\xc2\x91\x86\xd7\xf4K\xdf\xc2lV\xf4\xe8\x80\xfc\x8ep\xbb\x82\xb3\x86\x98F\x1c\xecS\xc8\x15\xcf\xdc\xf1\xed\xfc\xd8\x18r\xf9\x80\x0f\xfa\x8cO\x97(\x0b]\xf1\xdd\r\xe7\xbf\xed\x06\xbd\x1b?\xc5\xa0\xd7a\x82\xf3\xa8\xe6@\xf3\ri\xa1\xb10\xf6\xd4W\xbc\x86\x1a\xbb\xfd\x94!bS\xdb\xaeM\x92\x00#\x0b\xf7\xad\xe9\xc2\x8e\x86\xbfi![%\xd31]\xc6\xfc2\xc9\xda\xc6v\x82P\xcc\xa9\xea\xb9\xff\xf6\xc8\x17iD\xcf\xf3\xeeI\x04\xe9\xa1\x19\xbb\x01\x92\xf5nn4K\xf8\xbb\xc6\x17e>\xa7 \xbbv'
-        data = {"int": 1024*1024*1024, "float": 12345.67890, "text": "hello"*1024, "binary": binary}
-        with benchmark("pack 5K x 10 000", 0.78):
-            for i in range(10):
-                for y in range(1000):
-                    data_packed = msgpack.packb(data)
-                yield "."
-            valid = """\x84\xa3int\xce@\x00\x00\x00\xa4text\xda\x14\x00hellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohellohello\xa5float\xcb@\xc8\x1c\xd6\xe61\xf8\xa1\xa6binary\xda\x01\x00fqv\xf0\x1a"e\x10,\xbe\x9cT\x9e(\xa5]u\x072C\x8c\x15\xa2\xa8\x93Sw)\x19\x02\xdd\t\xfb\xf67\x88\xd9\xee\x86\xa1\xe4\xb6,\xc6\x14\xbb\xd7$z\x1d\xb2\xda\x85\xf5\xa0\x97^\x01*\xaf\xd3\xb0!\xb7\x9d\xea\x89\xbbh8\xa1"\xa7]e(@\xa2\xa5g\xb7[\xae\x8eE\xc2\x9fL\xb6s\x19\x19\r\xc8\x04S\xd0N\xe4]?/\x01\xea\xf6\xec\xd1\xb3\xc2\x91\x86\xd7\xf4K\xdf\xc2lV\xf4\xe8\x80\xfc\x8ep\xbb\x82\xb3\x86\x98F\x1c\xecS\xc8\x15\xcf\xdc\xf1\xed\xfc\xd8\x18r\xf9\x80\x0f\xfa\x8cO\x97(\x0b]\xf1\xdd\r\xe7\xbf\xed\x06\xbd\x1b?\xc5\xa0\xd7a\x82\xf3\xa8\xe6@\xf3\ri\xa1\xb10\xf6\xd4W\xbc\x86\x1a\xbb\xfd\x94!bS\xdb\xaeM\x92\x00#\x0b\xf7\xad\xe9\xc2\x8e\x86\xbfi![%\xd31]\xc6\xfc2\xc9\xda\xc6v\x82P\xcc\xa9\xea\xb9\xff\xf6\xc8\x17iD\xcf\xf3\xeeI\x04\xe9\xa1\x19\xbb\x01\x92\xf5nn4K\xf8\xbb\xc6\x17e>\xa7 \xbbv"""
-            assert data_packed == valid, "%s<br>!=<br>%s" % (repr(data_packed), repr(valid))
-
-        with benchmark("unpack 5K x 10 000", 1.2):
-            for i in range(10):
-                for y in range(1000):
-                    data_unpacked = msgpack.unpackb(data_packed)
-                yield "."
-            assert data == data_unpacked, "%s != %s" % (data_unpacked, data)
-
-        with benchmark("streaming unpack 5K x 10 000", 1.4):
-            for i in range(10):
-                unpacker = msgpack.Unpacker()
-                for y in range(1000):
-                    unpacker.feed(data_packed)
-                    for data_unpacked in unpacker:
-                        pass
-                yield "."
-            assert data == data_unpacked, "%s != %s" % (data_unpacked, data)
-
-        # Db
-        from Db import Db
-        import sqlite3
-        yield "<br>Db: (version: %s, API: %s)<br>" % (sqlite3.sqlite_version, sqlite3.version)
-
-        schema = {
-            "db_name": "TestDb",
-            "db_file": "%s/benchmark.db" % config.data_dir,
-            "maps": {
-                ".*": {
-                    "to_table": {
-                        "test": "test"
-                    }
-                }
-            },
-            "tables": {
-                "test": {
-                    "cols": [
-                        ["test_id", "INTEGER"],
-                        ["title", "TEXT"],
-                        ["json_id", "INTEGER REFERENCES json (json_id)"]
-                    ],
-                    "indexes": ["CREATE UNIQUE INDEX test_key ON test(test_id, json_id)"],
-                    "schema_changed": 1426195822
-                }
-            }
-        }
-
-        if os.path.isfile("%s/benchmark.db" % config.data_dir):
-            os.unlink("%s/benchmark.db" % config.data_dir)
-
-        with benchmark("Open x 10", 0.13):
-            for i in range(10):
-                db = Db(schema, "%s/benchmark.db" % config.data_dir)
-                db.checkTables()
-                db.close()
-                yield "."
-
-        db = Db(schema, "%s/benchmark.db" % config.data_dir)
-        db.checkTables()
-        import json
-
-        with benchmark("Insert x 10 x 1000", 1.0):
-            for u in range(10):  # 10 user
-                data = {"test": []}
-                for i in range(1000):  # 1000 line of data
-                    data["test"].append({"test_id": i, "title": "Testdata for %s message %s" % (u, i)})
-                json.dump(data, open("%s/test_%s.json" % (config.data_dir, u), "w"))
-                db.updateJson("%s/test_%s.json" % (config.data_dir, u))
-                os.unlink("%s/test_%s.json" % (config.data_dir, u))
-                yield "."
-
-        with benchmark("Buffered insert x 100 x 100", 1.3):
-            cur = db.getCursor()
-            cur.execute("BEGIN")
-            cur.logging = False
-            for u in range(100, 200):  # 100 user
-                data = {"test": []}
-                for i in range(100):  # 1000 line of data
-                    data["test"].append({"test_id": i, "title": "Testdata for %s message %s" % (u, i)})
-                json.dump(data, open("%s/test_%s.json" % (config.data_dir, u), "w"))
-                db.updateJson("%s/test_%s.json" % (config.data_dir, u), cur=cur)
-                os.unlink("%s/test_%s.json" % (config.data_dir, u))
-                if u % 10 == 0:
-                    yield "."
-            cur.execute("COMMIT")
-
-        yield " - Total rows in db: %s<br>" % db.execute("SELECT COUNT(*) AS num FROM test").fetchone()[0]
-
-        with benchmark("Indexed query x 1000", 0.25):
-            found = 0
-            cur = db.getCursor()
-            cur.logging = False
-            for i in range(1000):  # 1000x by test_id
-                res = cur.execute("SELECT * FROM test WHERE test_id = %s" % i)
-                for row in res:
-                    found += 1
-                if i % 100 == 0:
-                    yield "."
-
-            assert found == 20000, "Found: %s != 20000" % found
-
-        with benchmark("Not indexed query x 100", 0.6):
-            found = 0
-            cur = db.getCursor()
-            cur.logging = False
-            for i in range(100):  # 1000x by test_id
-                res = cur.execute("SELECT * FROM test WHERE json_id = %s" % i)
-                for row in res:
-                    found += 1
-                if i % 10 == 0:
-                    yield "."
-
-            assert found == 18900, "Found: %s != 18900" % found
-
-        with benchmark("Like query x 100", 1.8):
-            found = 0
-            cur = db.getCursor()
-            cur.logging = False
-            for i in range(100):  # 1000x by test_id
-                res = cur.execute("SELECT * FROM test WHERE title LIKE '%%message %s%%'" % i)
-                for row in res:
-                    found += 1
-                if i % 10 == 0:
-                    yield "."
-
-            assert found == 38900, "Found: %s != 11000" % found
-
-        db.close()
-        if os.path.isfile("%s/benchmark.db" % config.data_dir):
-            os.unlink("%s/benchmark.db" % config.data_dir)
+        for obj, stat in sorted(list(ref_count.items()), key=lambda x: x[1][0], reverse=True)[0:30]:  # Sorted by count
+            yield " - %.1fkb = %s x %s<br>" % (stat[1], stat[0], html.escape(str(obj)))
 
         gc.collect()  # Implicit grabage collection
 
-        # Zip
-        yield "<br>Compression:<br>"
-        import zipfile
-        test_data = "Test" * 1024
-        file_name = "\xc3\x81rv\xc3\xadzt\xc5\xb0r\xc5\x91t\xc3\xbck\xc3\xb6r\xc3\xb3g\xc3\xa9p\xe4\xb8\xad\xe5\x8d\x8e%s.txt"
-
-        with benchmark("Zip pack x 10", 0.12):
-            for i in range(10):
-                with zipfile.ZipFile('%s/test.zip' % config.data_dir, 'w') as archive:
-                    for y in range(100):
-                        zip_info = zipfile.ZipInfo(file_name % y, (1980,1,1,0,0,0))
-                        zip_info.compress_type = zipfile.ZIP_DEFLATED
-                        zip_info.create_system = 3
-                        archive.writestr(zip_info, test_data)
-                yield "."
-
-            hash = CryptHash.sha512sum(open("%s/test.zip" % config.data_dir, "rb"))
-            valid = "f6ef623e6653883a1758db14aa593350e26c9dc53a8406d6e6defd6029dbd483"
-            assert hash == valid, "Invalid hash: %s != %s<br>" % (hash, valid)
-
-        with benchmark("Zip unpack x 10", 0.2):
-            for i in range(10):
-                with zipfile.ZipFile('%s/test.zip' % config.data_dir) as archive:
-                    for y in range(100):
-                        assert archive.read(file_name % y) == test_data
-                yield "."
-
-        if os.path.isfile("%s/test.zip" % config.data_dir):
-            os.unlink("%s/test.zip" % config.data_dir)
-
-        # Tar.gz
-        import tarfile
-        import struct
-
-        # Monkey patch _init_write_gz to use fixed date in order to keep the hash independent from datetime
-        def nodate_write_gzip_header(self):
-            self.mtime = 0
-            original_write_gzip_header(self)
-
-        import gzip
-        original_write_gzip_header = gzip.GzipFile._write_gzip_header
-        gzip.GzipFile._write_gzip_header = nodate_write_gzip_header
-
-        test_data_io = StringIO("Test" * 1024)
-        with benchmark("Tar.gz pack x 10", 0.3):
-            for i in range(10):
-                with tarfile.open('%s/test.tar.gz' % config.data_dir, 'w:gz') as archive:
-                    for y in range(100):
-                        test_data_io.seek(0)
-                        tar_info = tarfile.TarInfo(file_name % y)
-                        tar_info.size = 4 * 1024
-                        archive.addfile(tar_info, test_data_io)
-                yield "."
-
-            hash = CryptHash.sha512sum(open("%s/test.tar.gz" % config.data_dir, "rb"))
-            valid = "4704ebd8c987ed6f833059f1de9c475d443b0539b8d4c4cb8b49b26f7bbf2d19"
-            assert hash == valid, "Invalid hash: %s != %s<br>" % (hash, valid)
-
-        with benchmark("Tar.gz unpack x 10", 0.2):
-            for i in range(10):
-                with tarfile.open('%s/test.tar.gz' % config.data_dir, 'r:gz') as archive:
-                    for y in range(100):
-                        assert archive.extractfile(file_name % y).read() == test_data
-                yield "."
-
-        if os.path.isfile("%s/test.tar.gz" % config.data_dir):
-            os.unlink("%s/test.tar.gz" % config.data_dir)
-
-        # Tar.bz2
-        import tarfile
-        test_data_io = StringIO("Test" * 1024)
-        with benchmark("Tar.bz2 pack x 10", 2.0):
-            for i in range(10):
-                with tarfile.open('%s/test.tar.bz2' % config.data_dir, 'w:bz2') as archive:
-                    for y in range(100):
-                        test_data_io.seek(0)
-                        tar_info = tarfile.TarInfo(file_name % y)
-                        tar_info.size = 4 * 1024
-                        archive.addfile(tar_info, test_data_io)
-                yield "."
-
-            hash = CryptHash.sha512sum(open("%s/test.tar.bz2" % config.data_dir, "rb"))
-            valid = "90cba0b4d9abaa37b830bf37e4adba93bfd183e095b489ebee62aaa94339f3b5"
-            assert hash == valid, "Invalid hash: %s != %s<br>" % (hash, valid)
-
-        with benchmark("Tar.bz2 unpack x 10", 0.5):
-            for i in range(10):
-                with tarfile.open('%s/test.tar.bz2' % config.data_dir, 'r:bz2') as archive:
-                    for y in range(100):
-                        assert archive.extractfile(file_name % y).read() == test_data
-                yield "."
-
-        if os.path.isfile("%s/test.tar.bz2" % config.data_dir):
-            os.unlink("%s/test.tar.bz2" % config.data_dir)
-
-
-        yield "<br>Done. Total: %.2fs" % (time.time() - t)
-
+    @helper.encodeResponse
     def actionGcCollect(self):
         import gc
         self.sendHeader()

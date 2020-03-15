@@ -21,6 +21,15 @@ def importHostClasses():
 # Process result got back from tracker
 def processPeerRes(tracker_address, site, peers):
     added = 0
+
+    # Onion
+    found_onion = 0
+    for packed_address in peers["onion"]:
+        found_onion += 1
+        peer_onion, peer_port = helper.unpackOnionAddress(packed_address)
+        if site.addPeer(peer_onion, peer_port, source="tracker"):
+            added += 1
+
     # Ip4
     found_ipv4 = 0
     peers_normal = itertools.chain(peers.get("ip4", []), peers.get("ipv4", []), peers.get("ipv6", []))
@@ -28,13 +37,6 @@ def processPeerRes(tracker_address, site, peers):
         found_ipv4 += 1
         peer_ip, peer_port = helper.unpackAddress(packed_address)
         if site.addPeer(peer_ip, peer_port, source="tracker"):
-            added += 1
-    # Onion
-    found_onion = 0
-    for packed_address in peers["onion"]:
-        found_onion += 1
-        peer_onion, peer_port = helper.unpackOnionAddress(packed_address)
-        if site.addPeer(peer_onion, peer_port, source="tracker"):
             added += 1
 
     if added:
@@ -69,7 +71,7 @@ class SiteAnnouncerPlugin(object):
                 return None
             time_full_announced[tracker_address] = time.time()
             from Site import SiteManager
-            sites = [site for site in SiteManager.site_manager.sites.values() if site.settings["serving"]]
+            sites = [site for site in SiteManager.site_manager.sites.values() if site.isServing()]
 
         # Create request
         add_types = self.getOpenedServiceTypes()
@@ -119,7 +121,7 @@ class SiteAnnouncerPlugin(object):
                 onion = self.site.connection_server.tor_manager.getOnion(site.address)
                 publickey = self.site.connection_server.tor_manager.getPublickey(onion)
                 if publickey not in request["onion_signs"]:
-                    sign = CryptRsa.sign(res["onion_sign_this"], self.site.connection_server.tor_manager.getPrivatekey(onion))
+                    sign = CryptRsa.sign(res["onion_sign_this"].encode("utf8"), self.site.connection_server.tor_manager.getPrivatekey(onion))
                     request["onion_signs"][publickey] = sign
             res = tracker_peer.request("announce", request)
             if not res or "onion_sign_this" in res:
@@ -131,8 +133,8 @@ class SiteAnnouncerPlugin(object):
             tracker_peer.remove()  # Close connection, we don't need it in next 5 minute
 
         self.site.log.debug(
-            "Tracker announce result: zero://%s (sites: %s, new peers: %s) in %.3fs" %
-            (tracker_address, site_index, peers_added, time.time() - s)
+            "Tracker announce result: zero://%s (sites: %s, new peers: %s, add: %s) in %.3fs" %
+            (tracker_address, site_index, peers_added, add_types, time.time() - s)
         )
 
         return True

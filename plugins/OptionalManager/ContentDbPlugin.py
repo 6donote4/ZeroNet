@@ -24,8 +24,8 @@ class ContentDbPlugin(object):
         self.time_peer_numbers_updated = 0
         self.my_optional_files = {}  # Last 50 site_address/inner_path called by fileWrite (auto-pinning these files)
         self.optional_files = collections.defaultdict(dict)
-        self.optional_files_loading = False
-        helper.timer(60 * 5, self.checkOptionalLimit)
+        self.optional_files_loaded = False
+        self.timer_check_optional = helper.timer(60 * 5, self.checkOptionalLimit)
         super(ContentDbPlugin, self).__init__(*args, **kwargs)
 
     def getSchema(self):
@@ -60,9 +60,6 @@ class ContentDbPlugin(object):
         super(ContentDbPlugin, self).initSite(site)
         if self.need_filling:
             self.fillTableFileOptional(site)
-        if not self.optional_files_loading:
-            gevent.spawn_later(1, self.loadFilesOptional)
-            self.optional_files_loading = True
 
     def checkTables(self):
         changed_tables = super(ContentDbPlugin, self).checkTables()
@@ -88,10 +85,10 @@ class ContentDbPlugin(object):
                 site_sizes[row["site_id"]]["optional_downloaded"] += row["size"]
 
         # Site site size stats to sites.json settings
-        site_ids_reverse = {val: key for key, val in self.site_ids.iteritems()}
-        for site_id, stats in site_sizes.iteritems():
+        site_ids_reverse = {val: key for key, val in self.site_ids.items()}
+        for site_id, stats in site_sizes.items():
             site_address = site_ids_reverse.get(site_id)
-            if not site_address:
+            if not site_address or site_address not in self.sites:
                 self.log.error("Not found site_id: %s" % site_id)
                 continue
             site = self.sites[site_address]
@@ -100,7 +97,7 @@ class ContentDbPlugin(object):
             total += stats["size_optional"]
             total_downloaded += stats["optional_downloaded"]
 
-        self.log.debug(
+        self.log.info(
             "Loaded %s optional files: %.2fMB, downloaded: %.2fMB in %.3fs" %
             (num, float(total) / 1024 / 1024, float(total_downloaded) / 1024 / 1024, time.time() - s)
         )
@@ -108,7 +105,7 @@ class ContentDbPlugin(object):
         if self.need_filling and self.getOptionalLimitBytes() >= 0 and self.getOptionalLimitBytes() < total_downloaded:
             limit_bytes = self.getOptionalLimitBytes()
             limit_new = round((float(total_downloaded) / 1024 / 1024 / 1024) * 1.1, 2)  # Current limit + 10%
-            self.log.debug(
+            self.log.info(
                 "First startup after update and limit is smaller than downloaded files size (%.2fGB), increasing it from %.2fGB to %.2fGB" %
                 (float(total_downloaded) / 1024 / 1024 / 1024, float(limit_bytes) / 1024 / 1024 / 1024, limit_new)
             )
@@ -126,7 +123,6 @@ class ContentDbPlugin(object):
         if not site_id:
             return False
         cur = self.getCursor()
-        cur.execute("BEGIN")
         res = cur.execute("SELECT * FROM content WHERE size_files_optional > 0 AND site_id = %s" % site_id)
         num = 0
         for row in res.fetchall():
@@ -135,7 +131,6 @@ class ContentDbPlugin(object):
                 num += self.setContentFilesOptional(site, row["inner_path"], content, cur=cur)
             except Exception as err:
                 self.log.error("Error loading %s into file_optional: %s" % (row["inner_path"], err))
-        cur.execute("COMMIT")
         cur.close()
 
         # Set my files to pinned
@@ -144,29 +139,25 @@ class ContentDbPlugin(object):
         if not user:
             user = UserManager.user_manager.create()
         auth_address = user.getAuthAddress(site.address)
-        self.execute(
+        res = self.execute(
             "UPDATE file_optional SET is_pinned = 1 WHERE site_id = :site_id AND inner_path LIKE :inner_path",
             {"site_id": site_id, "inner_path": "%%/%s/%%" % auth_address}
         )
 
         self.log.debug(
             "Filled file_optional table for %s in %.3fs (loaded: %s, is_pinned: %s)" %
-            (site.address, time.time() - s, num, self.cur.cursor.rowcount)
+            (site.address, time.time() - s, num, res.rowcount)
         )
         self.filled[site.address] = True
 
     def setContentFilesOptional(self, site, content_inner_path, content, cur=None):
         if not cur:
             cur = self
-            try:
-                cur.execute("BEGIN")
-            except Exception as err:
-                self.log.warning("Transaction begin error %s %s: %s" % (site, content_inner_path, Debug.formatException(err)))
 
         num = 0
         site_id = self.site_ids[site.address]
         content_inner_dir = helper.getDirname(content_inner_path)
-        for relative_inner_path, file in content.get("files_optional", {}).iteritems():
+        for relative_inner_path, file in content.get("files_optional", {}).items():
             file_inner_path = content_inner_dir + relative_inner_path
             hash_id = int(file["sha512"][0:4], 16)
             if hash_id in site.content_manager.hashfield:
@@ -193,11 +184,6 @@ class ContentDbPlugin(object):
             self.optional_files[site_id][file_inner_path[-8:]] = 1
             num += 1
 
-        if cur == self:
-            try:
-                cur.execute("END")
-            except Exception as err:
-                self.log.warning("Transaction end error %s %s: %s" % (site, content_inner_path, Debug.formatException(err)))
         return num
 
     def setContent(self, site, inner_path, content, size=0):
@@ -232,14 +218,14 @@ class ContentDbPlugin(object):
         num_file = 0
         num_updated = 0
         num_site = 0
-        for site in self.sites.values():
+        for site in list(self.sites.values()):
             if not site.content_manager.has_optional_files:
                 continue
-            if not site.settings["serving"]:
+            if not site.isServing():
                 continue
             has_updated_hashfield = next((
                 peer
-                for peer in site.peers.itervalues()
+                for peer in site.peers.values()
                 if peer.has_hashfield and peer.hashfield.time_changed > self.time_peer_numbers_updated
             ), None)
 
@@ -248,7 +234,7 @@ class ContentDbPlugin(object):
 
             hashfield_peers = itertools.chain.from_iterable(
                 peer.hashfield.storage
-                for peer in site.peers.itervalues()
+                for peer in site.peers.values()
                 if peer.has_hashfield
             )
             peer_nums = collections.Counter(
@@ -269,10 +255,8 @@ class ContentDbPlugin(object):
                 if peer_num != row["peer"]:
                     updates[row["file_id"]] = peer_num
 
-            self.execute("BEGIN")
-            for file_id, peer_num in updates.iteritems():
+            for file_id, peer_num in updates.items():
                 self.execute("UPDATE file_optional SET peer = ? WHERE file_id = ?", (peer_num, file_id))
-            self.execute("END")
 
             num_updated += len(updates)
             num_file += len(peer_nums)
@@ -394,7 +378,7 @@ class ContentDbPlugin(object):
 
         self.updatePeerNumbers()
 
-        site_ids_reverse = {val: key for key, val in self.site_ids.iteritems()}
+        site_ids_reverse = {val: key for key, val in self.site_ids.items()}
         deleted_file_ids = []
         for row in self.queryDeletableFiles():
             site_address = site_ids_reverse.get(row["site_id"])
@@ -415,8 +399,16 @@ class ContentDbPlugin(object):
                 break
 
         cur = self.getCursor()
-        cur.execute("BEGIN")
         for file_id in deleted_file_ids:
             cur.execute("UPDATE file_optional SET is_downloaded = 0, is_pinned = 0, peer = peer - 1 WHERE ?", {"file_id": file_id})
-        cur.execute("COMMIT")
         cur.close()
+
+
+@PluginManager.registerTo("SiteManager")
+class SiteManagerPlugin(object):
+    def load(self, *args, **kwargs):
+        back = super(SiteManagerPlugin, self).load(*args, **kwargs)
+        if self.sites and not content_db.optional_files_loaded and content_db.conn:
+            content_db.optional_files_loaded = True
+            content_db.loadFilesOptional()
+        return back

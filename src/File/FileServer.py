@@ -2,6 +2,7 @@ import logging
 import time
 import random
 import socket
+import sys
 
 import gevent
 import gevent.pool
@@ -10,7 +11,7 @@ from gevent.server import StreamServer
 import util
 from util import helper
 from Config import config
-from FileRequest import FileRequest
+from .FileRequest import FileRequest
 from Peer import PeerPortchecker
 from Site import SiteManager
 from Connection import ConnectionServer
@@ -41,7 +42,7 @@ class FileServer(ConnectionServer):
             port = config.tor_hs_port
             config.fileserver_port = port
         elif port == 0:  # Use random port
-            port_range_from, port_range_to = map(int, config.fileserver_port_range.split("-"))
+            port_range_from, port_range_to = list(map(int, config.fileserver_port_range.split("-")))
             port = self.getRandomPort(ip, port_range_from, port_range_to)
             config.fileserver_port = port
             if not port:
@@ -59,12 +60,12 @@ class FileServer(ConnectionServer):
                 self.stream_server_proxy = StreamServer(
                     ("0.0.0.0", self.port), self.handleIncomingConnection, spawn=self.pool, backlog=100
                 )
-            except Exception, err:
+            except Exception as err:
                 self.log.info("StreamServer proxy create error: %s" % Debug.formatException(err))
 
         self.port_opened = {}
 
-        self.sites = {}
+        self.sites = self.site_manager.sites
         self.last_request = time.time()
         self.files_parsing = {}
         self.ui_server = None
@@ -108,7 +109,7 @@ class FileServer(ConnectionServer):
                 self.log.debug("IPv6 supported on IP %s" % local_ipv6)
                 return True
         except socket.error as err:
-            self.log.error("IPv6 not supported: %s" % err)
+            self.log.warning("IPv6 not supported: %s" % err)
             return False
         except Exception as err:
             self.log.error("IPv6 check error: %s" % err)
@@ -117,7 +118,7 @@ class FileServer(ConnectionServer):
     def listenProxy(self):
         try:
             self.stream_server_proxy.serve_forever()
-        except Exception, err:
+        except Exception as err:
             if err.errno == 98:  # Address already in use error
                 self.log.debug("StreamServer proxy listen error: %s" % err)
             else:
@@ -150,6 +151,12 @@ class FileServer(ConnectionServer):
         FileRequest = imp.load_source("FileRequest", "src/File/FileRequest.py").FileRequest
 
     def portCheck(self):
+        if config.offline:
+            self.log.info("Offline mode: port check disabled")
+            res = {"ipv4": None, "ipv6": None}
+            self.port_opened = res
+            return res
+
         if config.ip_external:
             for ip_external in config.ip_external:
                 SiteManager.peer_blacklist.append((ip_external, self.port))  # Add myself to peer blacklist
@@ -216,7 +223,7 @@ class FileServer(ConnectionServer):
 
     # Check site file integrity
     def checkSite(self, site, check_files=False):
-        if site.settings["serving"]:
+        if site.isServing():
             site.announce(mode="startup")  # Announce site to tracker
             site.update(check_files=check_files)  # Update site's content.json and download changed files
             site.sendMyHashfield()
@@ -231,7 +238,7 @@ class FileServer(ConnectionServer):
         if not self.port_opened or force_port_check:  # Test and open port if not tested yet
             if len(self.sites) <= 2:  # Don't wait port opening on first startup
                 sites_checking = True
-                for address, site in self.sites.items():
+                for address, site in list(self.sites.items()):
                     gevent.spawn(self.checkSite, site, check_files)
 
             self.portCheck()
@@ -242,8 +249,8 @@ class FileServer(ConnectionServer):
         if not sites_checking:
             check_pool = gevent.pool.Pool(5)
             # Check sites integrity
-            for site in sorted(self.sites.values(), key=lambda site: site.settings.get("modified", 0), reverse=True):
-                if not site.settings["serving"]:
+            for site in sorted(list(self.sites.values()), key=lambda site: site.settings.get("modified", 0), reverse=True):
+                if not site.isServing():
                     continue
                 check_thread = check_pool.spawn(self.checkSite, site, check_files)  # Check in new thread
                 time.sleep(2)
@@ -263,8 +270,8 @@ class FileServer(ConnectionServer):
                 (len(self.connections), self.has_internet, len(peers_protected))
             )
 
-            for address, site in self.sites.items():
-                if not site.settings["serving"]:
+            for address, site in list(self.sites.items()):
+                if not site.isServing():
                     continue
 
                 if not startup:
@@ -273,8 +280,8 @@ class FileServer(ConnectionServer):
                 time.sleep(1)  # Prevent too quick request
 
             peers_protected = set([])
-            for address, site in self.sites.items():
-                if not site.settings["serving"]:
+            for address, site in list(self.sites.items()):
+                if not site.isServing():
                     continue
 
                 if site.peers:
@@ -313,8 +320,8 @@ class FileServer(ConnectionServer):
         while 1:
             config.loadTrackersFile()
             s = time.time()
-            for address, site in self.sites.items():
-                if not site.settings["serving"]:
+            for address, site in list(self.sites.items()):
+                if not site.isServing():
                     continue
                 gevent.spawn(self.announceSite, site).join(timeout=10)
                 time.sleep(1)
@@ -340,12 +347,25 @@ class FileServer(ConnectionServer):
 
     # Bind and start serving sites
     def start(self, check_sites=True):
+        if self.stopping:
+            return False
+
         ConnectionServer.start(self)
+
+        try:
+            self.stream_server.start()
+        except Exception as err:
+            self.log.error("Error listening on: %s:%s: %s" % (self.ip, self.port, err))
+            if "ui_server" in dir(sys.modules["main"]):
+                self.log.debug("Stopping UI Server.")
+                sys.modules["main"].ui_server.stop()
+                return False
+
         self.sites = self.site_manager.list()
         if config.debug:
             # Auto reload FileRequest on change
             from Debug import DebugReloader
-            DebugReloader(self.reload)
+            DebugReloader.watcher.addCallback(self.reload)
 
         if check_sites:  # Open port, Update sites, Check files integrity
             gevent.spawn(self.checkSites)

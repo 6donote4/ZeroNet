@@ -1,16 +1,21 @@
 import re
 import time
-import cgi
+import html
+import os
 
 import gevent
 
 from Plugin import PluginManager
 from Config import config
 from util import helper
+from util.Flag import flag
 from Translate import Translate
 
+
+plugin_dir = os.path.dirname(__file__)
+
 if "_" not in locals():
-    _ = Translate("plugins/OptionalManager/languages/")
+    _ = Translate(plugin_dir + "/languages/")
 
 bigfile_sha512_cache = {}
 
@@ -28,7 +33,7 @@ class UiWebsocketPlugin(object):
         content_db.my_optional_files[self.site.address + "/" + content_inner_dir] = time.time()
         if len(content_db.my_optional_files) > 50:  # Keep only last 50
             oldest_key = min(
-                content_db.my_optional_files.iterkeys(),
+                iter(content_db.my_optional_files.keys()),
                 key=(lambda key: content_db.my_optional_files[key])
             )
             del content_db.my_optional_files[oldest_key]
@@ -60,18 +65,21 @@ class UiWebsocketPlugin(object):
             bigfile_sha512_cache[file_key] = sha512
 
         if sha512 in site.storage.piecefields:
-            piecefield = site.storage.piecefields[sha512].tostring()
+            piecefield = site.storage.piecefields[sha512].tobytes()
         else:
             piecefield = None
 
         if piecefield:
             row["pieces"] = len(piecefield)
-            row["pieces_downloaded"] = piecefield.count("1")
+            row["pieces_downloaded"] = piecefield.count(b"\x01")
             row["downloaded_percent"] = 100 * row["pieces_downloaded"] / row["pieces"]
             if row["pieces_downloaded"]:
-                if not file_info:
-                    file_info = site.content_manager.getFileInfo(row["inner_path"])
-                row["bytes_downloaded"] = row["pieces_downloaded"] * file_info.get("piece_size", 0)
+                if row["pieces"] == row["pieces_downloaded"]:
+                    row["bytes_downloaded"] = row["size"]
+                else:
+                    if not file_info:
+                        file_info = site.content_manager.getFileInfo(row["inner_path"])
+                    row["bytes_downloaded"] = row["pieces_downloaded"] * file_info.get("piece_size", 0)
             else:
                 row["bytes_downloaded"] = 0
 
@@ -80,13 +88,13 @@ class UiWebsocketPlugin(object):
         # Add leech / seed stats
         row["peer_seed"] = 0
         row["peer_leech"] = 0
-        for peer in site.peers.itervalues():
+        for peer in site.peers.values():
             if not peer.time_piecefields_updated or sha512 not in peer.piecefields:
                 continue
-            peer_piecefield = peer.piecefields[sha512].tostring()
+            peer_piecefield = peer.piecefields[sha512].tobytes()
             if not peer_piecefield:
                 continue
-            if peer_piecefield == "1" * len(peer_piecefield):
+            if peer_piecefield == b"\x01" * len(peer_piecefield):
                 row["peer_seed"] += 1
             else:
                 row["peer_leech"] += 1
@@ -102,7 +110,7 @@ class UiWebsocketPlugin(object):
 
     # Optional file functions
 
-    def actionOptionalFileList(self, to, address=None, orderby="time_downloaded DESC", limit=10, filter="downloaded"):
+    def actionOptionalFileList(self, to, address=None, orderby="time_downloaded DESC", limit=10, filter="downloaded", filter_inner_path=None):
         if not address:
             address = self.site.address
 
@@ -140,6 +148,8 @@ class UiWebsocketPlugin(object):
 
         if "pinned" in filter:
             wheres["is_pinned"] = 1
+        if filter_inner_path:
+            wheres["inner_path__like"] = filter_inner_path
 
         if address == "all":
             join = "LEFT JOIN site USING (site_id)"
@@ -209,6 +219,7 @@ class UiWebsocketPlugin(object):
 
         return "ok"
 
+    @flag.no_multiuser
     def actionOptionalFilePin(self, to, inner_path, address=None):
         if type(inner_path) is not list:
             inner_path = [inner_path]
@@ -216,11 +227,12 @@ class UiWebsocketPlugin(object):
         num_file = len(inner_path)
         if back == "ok":
             if num_file == 1:
-                self.cmd("notification", ["done", _["Pinned %s"] % cgi.escape(helper.getFilename(inner_path[0])), 5000])
+                self.cmd("notification", ["done", _["Pinned %s"] % html.escape(helper.getFilename(inner_path[0])), 5000])
             else:
                 self.cmd("notification", ["done", _["Pinned %s files"] % num_file, 5000])
         self.response(to, back)
 
+    @flag.no_multiuser
     def actionOptionalFileUnpin(self, to, inner_path, address=None):
         if type(inner_path) is not list:
             inner_path = [inner_path]
@@ -228,11 +240,12 @@ class UiWebsocketPlugin(object):
         num_file = len(inner_path)
         if back == "ok":
             if num_file == 1:
-                self.cmd("notification", ["done", _["Removed pin from %s"] % cgi.escape(helper.getFilename(inner_path[0])), 5000])
+                self.cmd("notification", ["done", _["Removed pin from %s"] % html.escape(helper.getFilename(inner_path[0])), 5000])
             else:
                 self.cmd("notification", ["done", _["Removed pin from %s files"] % num_file, 5000])
         self.response(to, back)
 
+    @flag.no_multiuser
     def actionOptionalFileDelete(self, to, inner_path, address=None):
         if not address:
             address = self.site.address
@@ -270,10 +283,8 @@ class UiWebsocketPlugin(object):
 
     # Limit functions
 
+    @flag.admin
     def actionOptionalLimitStats(self, to):
-        if "ADMIN" not in self.site.settings["permissions"]:
-            return self.response(to, "Forbidden")
-
         back = {}
         back["limit"] = config.optional_limit
         back["used"] = self.site.content_manager.contents.db.getOptionalUsedBytes()
@@ -281,10 +292,10 @@ class UiWebsocketPlugin(object):
 
         self.response(to, back)
 
+    @flag.no_multiuser
+    @flag.admin
     def actionOptionalLimitSet(self, to, limit):
-        if "ADMIN" not in self.site.settings["permissions"]:
-            return self.response(to, {"error": "Forbidden"})
-        config.optional_limit = re.sub("\.0+$", "", limit)  # Remove unnecessary digits from end
+        config.optional_limit = re.sub(r"\.0+$", "", limit)  # Remove unnecessary digits from end
         config.saveValue("optional_limit", limit)
         self.response(to, "ok")
 
@@ -301,6 +312,7 @@ class UiWebsocketPlugin(object):
 
         self.response(to, site.settings.get("optional_help", {}))
 
+    @flag.no_multiuser
     def actionOptionalHelp(self, to, directory, title, address=None):
         if not address:
             address = self.site.address
@@ -329,7 +341,7 @@ class UiWebsocketPlugin(object):
         self.cmd("notification", [
             "done",
             _["You started to help distribute <b>%s</b>.<br><small>Directory: %s</small>"] %
-            (cgi.escape(title), cgi.escape(directory)),
+            (html.escape(title), html.escape(directory)),
             10000
         ])
 
@@ -337,6 +349,7 @@ class UiWebsocketPlugin(object):
 
         self.response(to, dict(stats))
 
+    @flag.no_multiuser
     def actionOptionalHelpRemove(self, to, directory, address=None):
         if not address:
             address = self.site.address
@@ -356,6 +369,7 @@ class UiWebsocketPlugin(object):
         site.settings["autodownloadoptional"] = value
         self.response(to, value)
 
+    @flag.no_multiuser
     def actionOptionalHelpAll(self, to, value, address=None):
         if not address:
             address = self.site.address
@@ -373,10 +387,10 @@ class UiWebsocketPlugin(object):
                 self.cmd(
                     "confirm",
                     [
-                        _["Help distribute all new optional files on site <b>%s</b>"] % cgi.escape(site_title),
+                        _["Help distribute all new optional files on site <b>%s</b>"] % html.escape(site_title),
                         _["Yes, I want to help!"]
                     ],
-                    lambda (res): self.cbOptionalHelpAll(to, site, True)
+                    lambda res: self.cbOptionalHelpAll(to, site, True)
                 )
         else:
             site.settings["autodownloadoptional"] = False

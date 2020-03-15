@@ -1,7 +1,6 @@
-import time
 import os
 
-from Db import Db
+from Db.Db import Db, DbTableError
 from Config import config
 from Plugin import PluginManager
 from Debug import Debug
@@ -12,21 +11,29 @@ class ContentDb(Db):
     def __init__(self, path):
         Db.__init__(self, {"db_name": "ContentDb", "tables": {}}, path)
         self.foreign_keys = True
+
+    def init(self):
         try:
             self.schema = self.getSchema()
-            self.checkTables()
+            try:
+                self.checkTables()
+            except DbTableError:
+                pass
             self.log.debug("Checking foreign keys...")
             foreign_key_error = self.execute("PRAGMA foreign_key_check").fetchone()
             if foreign_key_error:
                 raise Exception("Database foreign key error: %s" % foreign_key_error)
-        except Exception, err:
+        except Exception as err:
             self.log.error("Error loading content.db: %s, rebuilding..." % Debug.formatException(err))
             self.close()
-            os.unlink(path)  # Remove and try again
-            Db.__init__(self, {"db_name": "ContentDb", "tables": {}}, path)
+            os.unlink(self.db_path)  # Remove and try again
+            Db.__init__(self, {"db_name": "ContentDb", "tables": {}}, self.db_path)
             self.foreign_keys = True
             self.schema = self.getSchema()
-            self.checkTables()
+            try:
+                self.checkTables()
+            except DbTableError:
+                pass
         self.site_ids = {}
         self.sites = {}
 
@@ -95,8 +102,8 @@ class ContentDb(Db):
     def setContent(self, site, inner_path, content, size=0):
         self.insertOrUpdate("content", {
             "size": size,
-            "size_files": sum([val["size"] for key, val in content.get("files", {}).iteritems()]),
-            "size_files_optional": sum([val["size"] for key, val in content.get("files_optional", {}).iteritems()]),
+            "size_files": sum([val["size"] for key, val in content.get("files", {}).items()]),
+            "size_files_optional": sum([val["size"] for key, val in content.get("files_optional", {}).items()]),
             "modified": int(content.get("modified", 0))
         }, {
             "site_id": self.site_ids.get(site.address, 0),
@@ -149,6 +156,7 @@ def getContentDb(path=None):
         path = "%s/content.db" % config.data_dir
     if path not in content_dbs:
         content_dbs[path] = ContentDb(path)
+        content_dbs[path].init()
     return content_dbs[path]
 
 getContentDb()  # Pre-connect to default one

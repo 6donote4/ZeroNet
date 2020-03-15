@@ -1,6 +1,7 @@
 import logging
 import json
 import time
+import binascii
 
 import gevent
 
@@ -9,6 +10,7 @@ from Crypt import CryptBitcoin
 from Plugin import PluginManager
 from Config import config
 from util import helper
+from Debug import Debug
 
 
 @PluginManager.acceptPlugins
@@ -43,7 +45,7 @@ class User(object):
         user_data["sites"] = self.sites
         user_data["certs"] = self.certs
         user_data["settings"] = self.settings
-        helper.atomicWrite("%s/users.json" % config.data_dir, json.dumps(users, indent=2, sort_keys=True))
+        helper.atomicWrite("%s/users.json" % config.data_dir, helper.jsonDumps(users).encode("utf8"))
         self.log.debug("Saved in %.3fs" % (time.time() - s))
         self.delayed_save_thread = None
 
@@ -52,7 +54,7 @@ class User(object):
             self.delayed_save_thread = gevent.spawn_later(5, self.save)
 
     def getAddressAuthIndex(self, address):
-        return int(address.encode("hex"), 16)
+        return int(binascii.hexlify(address.encode()), 16)
 
     @util.Noparallel()
     def generateAuthAddress(self, address):
@@ -122,7 +124,7 @@ class User(object):
     # Add cert for the user
     def addCert(self, auth_address, domain, auth_type, auth_user_name, cert_sign):
         # Find privatekey by auth address
-        auth_privatekey = [site["auth_privatekey"] for site in self.sites.values() if site["auth_address"] == auth_address][0]
+        auth_privatekey = [site["auth_privatekey"] for site in list(self.sites.values()) if site["auth_address"] == auth_address][0]
         cert_node = {
             "auth_address": auth_address,
             "auth_privatekey": auth_privatekey,

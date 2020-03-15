@@ -1,8 +1,10 @@
 import socket
 import struct
+import os
 
 import pytest
 from util import helper
+from Config import config
 
 
 @pytest.mark.usefixtures("resetSettings")
@@ -22,13 +24,16 @@ class TestHelper:
                 assert len(helper.packAddress(ip, port)) == 18
                 assert helper.unpackAddress(helper.packAddress(ip, port)) == (ip, port)
 
-        with pytest.raises(struct.error) as err:
+            assert len(helper.packOnionAddress("boot3rdez4rzn36x.onion", port)) == 12
+            assert helper.unpackOnionAddress(helper.packOnionAddress("boot3rdez4rzn36x.onion", port)) == ("boot3rdez4rzn36x.onion", port)
+
+        with pytest.raises(struct.error):
             helper.packAddress("1.1.1.1", 100000)
 
         with pytest.raises(socket.error):
             helper.packAddress("999.1.1.1", 1)
 
-        with pytest.raises(AssertionError):
+        with pytest.raises(Exception):
             helper.unpackAddress("X")
 
     def testGetDirname(self):
@@ -38,7 +43,6 @@ class TestHelper:
         assert helper.getDirname("content.json") == ""
         assert helper.getDirname("data/users/") == "data/users/"
         assert helper.getDirname("/data/users/content.json") == "data/users/"
-
 
     def testGetFilename(self):
         assert helper.getFilename("data/users/content.json") == "content.json"
@@ -60,3 +64,16 @@ class TestHelper:
         assert not helper.isPrivateIp("1.1.1.1")
         assert helper.isPrivateIp("fe80::44f0:3d0:4e6:637c")
         assert not helper.isPrivateIp("fca5:95d6:bfde:d902:8951:276e:1111:a22c")  # cjdns
+
+    def testOpenLocked(self):
+        locked_f = helper.openLocked(config.data_dir + "/locked.file")
+        assert locked_f
+        with pytest.raises(BlockingIOError):
+            locked_f_again = helper.openLocked(config.data_dir + "/locked.file")
+        locked_f_different = helper.openLocked(config.data_dir + "/locked_different.file")
+
+        locked_f.close()
+        locked_f_different.close()
+
+        os.unlink(locked_f.name)
+        os.unlink(locked_f_different.name)

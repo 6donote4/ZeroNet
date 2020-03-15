@@ -1,5 +1,3 @@
-import os
-
 from Translate import Translate
 
 class TestTranslate:
@@ -13,7 +11,6 @@ class TestTranslate:
         assert 'translated = _("translated")' in data_translated
         assert 'not_translated = "original"' in data_translated
 
-
     def testTranslateStrictNamed(self):
         translate = Translate()
         data = """
@@ -25,6 +22,15 @@ class TestTranslate:
         assert 'translated = _("translated")' in data_translated
         assert 'not_translated = "original"' in data_translated
 
+    def testTranslateUtf8(self):
+        translate = Translate()
+        data = """
+            greeting = "Hi again árvztűrőtökörfúrógép!"
+        """
+        data_translated = translate.translateData(data, {"Hi again árvztűrőtökörfúrógép!": "Üdv újra árvztűrőtökörfúrógép!"})
+        assert data_translated == """
+            greeting = "Üdv újra árvztűrőtökörfúrógép!"
+        """
 
     def testTranslateEscape(self):
         _ = Translate()
@@ -36,7 +42,7 @@ class TestTranslate:
         data_translated = _(data)
         assert 'Szia' in data_translated
         assert '<' not in data_translated
-        assert data_translated == "Szia Hacker&lt;script&gt;alert('boom')&lt;/script&gt;!"
+        assert data_translated == "Szia Hacker&lt;script&gt;alert(&#x27;boom&#x27;)&lt;/script&gt;!"
 
         # Escaping dicts
         user = {"username": "Hacker<script>alert('boom')</script>"}
@@ -44,7 +50,7 @@ class TestTranslate:
         data_translated = _(data)
         assert 'Szia' in data_translated
         assert '<' not in data_translated
-        assert data_translated == "Szia Hacker&lt;script&gt;alert('boom')&lt;/script&gt;!"
+        assert data_translated == "Szia Hacker&lt;script&gt;alert(&#x27;boom&#x27;)&lt;/script&gt;!"
 
         # Escaping lists
         users = [{"username": "Hacker<script>alert('boom')</script>"}]
@@ -52,4 +58,4 @@ class TestTranslate:
         data_translated = _(data)
         assert 'Szia' in data_translated
         assert '<' not in data_translated
-        assert data_translated == "Szia Hacker&lt;script&gt;alert('boom')&lt;/script&gt;!"
+        assert data_translated == "Szia Hacker&lt;script&gt;alert(&#x27;boom&#x27;)&lt;/script&gt;!"

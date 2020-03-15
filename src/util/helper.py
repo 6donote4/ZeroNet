@@ -7,16 +7,14 @@ import collections
 import time
 import logging
 import base64
+import json
+
 import gevent
-
-if "inet_pton" not in dir(socket):
-    import win_inet_pton
-
 
 from Config import config
 
 
-def atomicWrite(dest, content, mode="w"):
+def atomicWrite(dest, content, mode="wb"):
     try:
         with open(dest + "-tmpnew", mode) as f:
             f.write(content)
@@ -27,30 +25,60 @@ def atomicWrite(dest, content, mode="w"):
         if os.path.isfile(dest):  # Rename old file to -tmpold
             os.rename(dest, dest + "-tmpold")
         os.rename(dest + "-tmpnew", dest)
-        os.unlink(dest + "-tmpold")  # Remove old file
+        if os.path.isfile(dest + "-tmpold"):
+            os.unlink(dest + "-tmpold")  # Remove old file
         return True
-    except Exception, err:
+    except Exception as err:
         from Debug import Debug
         logging.error(
-            "File %s write failed: %s, reverting..." %
-            (dest, Debug.formatException(err))
+            "File %s write failed: %s, (%s) reverting..." %
+            (dest, Debug.formatException(err), Debug.formatStack())
         )
         if os.path.isfile(dest + "-tmpold") and not os.path.isfile(dest):
             os.rename(dest + "-tmpold", dest)
         return False
 
 
-def openLocked(path, mode="w"):
-    if os.name == "posix":
-        import fcntl
-        f = open(path, mode)
-        fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
-    elif os.name == "nt":
-        import msvcrt
-        f = open(path, mode)
-        msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, -1)
-    else:
-        f = open(path, mode)
+def jsonDumps(data):
+    content = json.dumps(data, indent=1, sort_keys=True)
+
+    # Make it a little more compact by removing unnecessary white space
+    def compact_dict(match):
+        if "\n" in match.group(0):
+            return match.group(0).replace(match.group(1), match.group(1).strip())
+        else:
+            return match.group(0)
+
+    content = re.sub(r"\{(\n[^,\[\{]{10,100000}?)\}[, ]{0,2}\n", compact_dict, content, flags=re.DOTALL)
+
+    def compact_list(match):
+        if "\n" in match.group(0):
+            stripped_lines = re.sub("\n[ ]*", "", match.group(1))
+            return match.group(0).replace(match.group(1), stripped_lines)
+        else:
+            return match.group(0)
+
+    content = re.sub(r"\[([^\[\{]{2,100000}?)\][, ]{0,2}\n", compact_list, content, flags=re.DOTALL)
+
+    # Remove end of line whitespace
+    content = re.sub(r"(?m)[ ]+$", "", content)
+    return content
+
+
+def openLocked(path, mode="wb"):
+    try:
+        if os.name == "posix":
+            import fcntl
+            f = open(path, mode)
+            fcntl.flock(f, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        elif os.name == "nt":
+            import msvcrt
+            f = open(path, mode)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            f = open(path, mode)
+    except (IOError, PermissionError, BlockingIOError) as err:
+        raise BlockingIOError("Unable to lock file: %s" % err)
     return f
 
 
@@ -67,7 +95,7 @@ def getFreeSpace():
                 ctypes.c_wchar_p(config.data_dir), None, None, ctypes.pointer(free_space_pointer)
             )
             free_space = free_space_pointer.value
-        except Exception, err:
+        except Exception as err:
             logging.error("GetFreeSpace error: %s" % err)
     return free_space
 
@@ -91,9 +119,10 @@ def packPeers(peers):
     for peer in peers:
         try:
             ip_type = getIpType(peer.ip)
-            packed_peers[ip_type].append(peer.packMyAddress())
+            if ip_type in packed_peers:
+                packed_peers[ip_type].append(peer.packMyAddress())
         except Exception:
-            logging.error("Error packing peer address: %s" % peer)
+            logging.debug("Error packing peer address: %s" % peer)
     return packed_peers
 
 
@@ -110,7 +139,8 @@ def unpackAddress(packed):
     if len(packed) == 18:
         return socket.inet_ntop(socket.AF_INET6, packed[0:16]), struct.unpack_from("H", packed, 16)[0]
     else:
-        assert len(packed) == 6, "Invalid length ip4 packed address: %s" % len(packed)
+        if len(packed) != 6:
+            raise Exception("Invalid length ip4 packed address: %s" % len(packed))
         return socket.inet_ntoa(packed[0:4]), struct.unpack_from("H", packed, 4)[0]
 
 
@@ -122,7 +152,7 @@ def packOnionAddress(onion, port):
 
 # From 12byte format to ip, port
 def unpackOnionAddress(packed):
-    return base64.b32encode(packed[0:-2]).lower() + ".onion", struct.unpack("H", packed[-2:])[0]
+    return base64.b32encode(packed[0:-2]).lower().decode() + ".onion", struct.unpack("H", packed[-2:])[0]
 
 
 # Get dir from file
@@ -143,7 +173,7 @@ def getFilename(path):
 def getFilesize(path):
     try:
         s = os.stat(path)
-    except:
+    except Exception:
         return None
     if stat.S_ISREG(s.st_mode):  # Test if it's file
         return s.st_size
@@ -160,7 +190,7 @@ def toHashId(hash):
 def mergeDicts(dicts):
     back = collections.defaultdict(set)
     for d in dicts:
-        for key, val in d.iteritems():
+        for key, val in d.items():
             back[key].update(val)
     return dict(back)
 
@@ -168,16 +198,16 @@ def mergeDicts(dicts):
 # Request https url using gevent SSL error workaround
 def httpRequest(url, as_file=False):
     if url.startswith("http://"):
-        import urllib
-        response = urllib.urlopen(url)
+        import urllib.request
+        response = urllib.request.urlopen(url)
     else:  # Hack to avoid Python gevent ssl errors
         import socket
-        import httplib
+        import http.client
         import ssl
 
         host, request = re.match("https://(.*?)(/.*?)$", url).groups()
 
-        conn = httplib.HTTPSConnection(host)
+        conn = http.client.HTTPSConnection(host)
         sock = socket.create_connection((conn.host, conn.port), conn.timeout, conn.source_address)
         conn.sock = ssl.wrap_socket(sock, conn.key_file, conn.cert_file)
         conn.request("GET", request)
@@ -187,8 +217,8 @@ def httpRequest(url, as_file=False):
             response = httpRequest(response.getheader('Location'))
 
     if as_file:
-        import cStringIO as StringIO
-        data = StringIO.StringIO()
+        import io
+        data = io.BytesIO()
         while True:
             buff = response.read(1024 * 16)
             if not buff:
@@ -205,7 +235,7 @@ def timerCaller(secs, func, *args, **kwargs):
 
 
 def timer(secs, func, *args, **kwargs):
-    gevent.spawn_later(secs, timerCaller, secs, func, *args, **kwargs)
+    return gevent.spawn_later(secs, timerCaller, secs, func, *args, **kwargs)
 
 
 def create_connection(address, timeout=None, source_address=None):
@@ -245,14 +275,14 @@ def isIp(ip):
         try:
             socket.inet_pton(socket.AF_INET6, ip)
             return True
-        except:
+        except Exception:
             return False
 
     else:  # IPv4
         try:
             socket.inet_aton(ip)
             return True
-        except:
+        except Exception:
             return False
 
 
@@ -266,8 +296,10 @@ def getIpType(ip):
         return "onion"
     elif ":" in ip:
         return "ipv6"
-    else:
+    elif re.match(r"[0-9\.]+$", ip):
         return "ipv4"
+    else:
+        return "unknown"
 
 
 def createSocket(ip, sock_type=socket.SOCK_STREAM):
@@ -290,13 +322,35 @@ def getInterfaceIps(ip_type="ipv4"):
             s = createSocket(test_ip, sock_type=socket.SOCK_DGRAM)
             s.connect((test_ip, 1))
             res.append(s.getsockname()[0])
-        except:
+        except Exception:
             pass
 
     try:
         res += [ip[4][0] for ip in socket.getaddrinfo(socket.gethostname(), 1)]
-    except:
+    except Exception:
         pass
 
     res = [re.sub("%.*", "", ip) for ip in res if getIpType(ip) == ip_type and isIp(ip)]
     return list(set(res))
+
+
+def cmp(a, b):
+    return (a > b) - (a < b)
+
+
+def encodeResponse(func):
+    def wrapper(*args, **kwargs):
+        back = func(*args, **kwargs)
+        if "__next__" in dir(back):
+            for part in back:
+                if type(part) == bytes:
+                    yield part
+                else:
+                    yield part.encode()
+        else:
+            if type(back) == bytes:
+                yield back
+            else:
+                yield back.encode()
+
+    return wrapper

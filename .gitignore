@@ -7,9 +7,13 @@ __pycache__/
 
 # Hidden files
 .*
+!/.github
 !/.gitignore
 !/.travis.yml
+!/.gitlab-ci.yml
 
+# Temporary files
+*.bak
 
 # Data dir
 data/*
@@ -26,3 +30,6 @@ tools/phantomjs
 
 # ZeroNet config file
 zeronet.conf
+
+# ZeroNet log files
+log/*

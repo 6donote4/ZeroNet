@@ -12,7 +12,7 @@ from gevent.pool import Pool
 import util
 from util import helper
 from Debug import Debug
-from Connection import Connection
+from .Connection import Connection
 from Config import config
 from Crypt import CryptConnection
 from Crypt import CryptHash
@@ -46,6 +46,8 @@ class ConnectionServer(object):
         self.stream_server = None
         self.stream_server_proxy = None
         self.running = False
+        self.stopping = False
+        self.thread_checker = None
 
         self.stat_recv = defaultdict(lambda: defaultdict(int))
         self.stat_sent = defaultdict(lambda: defaultdict(int))
@@ -76,6 +78,8 @@ class ConnectionServer(object):
             self.handleRequest = request_handler
 
     def start(self, check_connections=True):
+        if self.stopping:
+            return False
         self.running = True
         if check_connections:
             self.thread_checker = gevent.spawn(self.checkConnections)
@@ -94,24 +98,41 @@ class ConnectionServer(object):
             self.stream_server = StreamServer(
                 (self.ip, self.port), self.handleIncomingConnection, spawn=self.pool, backlog=100
             )
-        except Exception, err:
+        except Exception as err:
             self.log.info("StreamServer create error: %s" % Debug.formatException(err))
 
     def listen(self):
+        if not self.running:
+            return None
+
         if self.stream_server_proxy:
             gevent.spawn(self.listenProxy)
         try:
             self.stream_server.serve_forever()
-        except Exception, err:
+        except Exception as err:
             self.log.info("StreamServer listen error: %s" % err)
+            return False
+        self.log.debug("Stopped.")
 
     def stop(self):
-        self.log.debug("Stopping")
+        self.log.debug("Stopping %s" % self.stream_server)
+        self.stopping = True
         self.running = False
+        if self.thread_checker:
+            gevent.kill(self.thread_checker)
         if self.stream_server:
             self.stream_server.stop()
 
+    def closeConnections(self):
+        self.log.debug("Closing all connection: %s" % len(self.connections))
+        for connection in self.connections[:]:
+            connection.close("Close all connections")
+
     def handleIncomingConnection(self, sock, addr):
+        if config.offline:
+            sock.close()
+            return False
+
         ip, port = addr[0:2]
         ip = ip.lower()
         if ip.startswith("::ffff:"):  # IPv6 to IPv4 mapping
@@ -178,7 +199,7 @@ class ConnectionServer(object):
                     return connection
 
         # No connection found
-        if create:  # Allow to create new connection if not found
+        if create and not config.offline:  # Allow to create new connection if not found
             if port == 0:
                 raise Exception("This peer is not connectable")
 
@@ -199,7 +220,7 @@ class ConnectionServer(object):
                     connection.close("Connection event return error")
                     raise Exception("Connection event return error")
 
-            except Exception, err:
+            except Exception as err:
                 connection.close("%s Connect error: %s" % (ip, Debug.formatException(err)))
                 raise err
 
@@ -227,11 +248,10 @@ class ConnectionServer(object):
 
     def checkConnections(self):
         run_i = 0
+        time.sleep(15)
         while self.running:
             run_i += 1
-            time.sleep(15)  # Check every minute
             self.ip_incoming = {}  # Reset connected ips counter
-            self.broken_ssl_ips = {}  # Reset broken ssl peerids count
             last_message_time = 0
             s = time.time()
             for connection in self.connections[:]:  # Make a copy
@@ -307,6 +327,8 @@ class ConnectionServer(object):
 
             if time.time() - s > 0.01:
                 self.log.debug("Connection cleanup in %.3fs" % (time.time() - s))
+
+            time.sleep(15)
         self.log.debug("Checkconnections ended")
 
     @util.Noparallel(blocking=False)
@@ -344,8 +366,8 @@ class ConnectionServer(object):
             for connection in self.connections
             if connection.handshake.get("time") and connection.last_ping_delay
         ])
-        if len(corrections) < 6:
+        if len(corrections) < 9:
             return 0.0
-        mid = len(corrections) / 2 - 1
+        mid = int(len(corrections) / 2 - 1)
         median = (corrections[mid - 1] + corrections[mid] + corrections[mid + 1]) / 3
         return median

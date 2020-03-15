@@ -1,8 +1,8 @@
 import re
-import urllib2
-import httplib
+import urllib.request
+import http.client
 import logging
-from urlparse import urlparse
+from urllib.parse import urlparse
 from xml.dom.minidom import parseString
 from xml.parsers.expat import ExpatError
 
@@ -15,6 +15,7 @@ import gevent
 # General TODOs:
 # Handle 0 or >1 IGDs
 
+logger = logging.getLogger("Upnp")
 
 class UpnpError(Exception):
     pass
@@ -43,7 +44,7 @@ def perform_m_search(local_ip):
          'MX: 2\r\n',
          'ST: {0}\r\n'.format(search_target),
          '\r\n']
-    )
+    ).encode("utf8")
 
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
@@ -56,7 +57,7 @@ def perform_m_search(local_ip):
         sock.settimeout(5)
 
     try:
-        return sock.recv(2048)
+        return sock.recv(2048).decode("utf8")
     except socket.error:
         raise UpnpError("No reply from IGD using {} as IP".format(local_ip))
     finally:
@@ -84,7 +85,7 @@ def _retrieve_igd_profile(url):
     Retrieve the device's UPnP profile.
     """
     try:
-        return urllib2.urlopen(url.geturl(), timeout=5).read().decode('utf-8')
+        return urllib.request.urlopen(url.geturl(), timeout=5).read().decode('utf-8')
     except socket.error:
         raise IGDError('IGD profile query timed out')
 
@@ -127,36 +128,51 @@ def _parse_igd_profile(profile_xml):
 
 # add description
 def _get_local_ips():
+    def method1():
+        try:
+            # get local ip using UDP and a  broadcast address
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+            # Not using <broadcast> because gevents getaddrinfo doesn't like that
+            # using port 1 as per hobbldygoop's comment about port 0 not working on osx:
+            # https://github.com/sirMackk/ZeroNet/commit/fdcd15cf8df0008a2070647d4d28ffedb503fba2#commitcomment-9863928
+            s.connect(('239.255.255.250', 1))
+            return [s.getsockname()[0]]
+        except:
+            pass
+
+    def method2():
+        # Get ip by using UDP and a normal address (google dns ip)
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.connect(('8.8.8.8', 0))
+            return [s.getsockname()[0]]
+        except:
+            pass
+
+    def method3():
+        # Get ip by '' hostname . Not supported on all platforms.
+        try:
+            return socket.gethostbyname_ex('')[2]
+        except:
+            pass
+
+    threads = [
+        gevent.spawn(method1),
+        gevent.spawn(method2),
+        gevent.spawn(method3)
+    ]
+
+    gevent.joinall(threads, timeout=5)
+
     local_ips = []
-
-    try:
-        # get local ip using UDP and a  broadcast address
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
-        # Not using <broadcast> because gevents getaddrinfo doesn't like that
-        # using port 1 as per hobbldygoop's comment about port 0 not working on osx:
-        # https://github.com/sirMackk/ZeroNet/commit/fdcd15cf8df0008a2070647d4d28ffedb503fba2#commitcomment-9863928
-        s.connect(('239.255.255.250', 1))
-        local_ips.append(s.getsockname()[0])
-    except:
-        pass
-
-    # Get ip by using UDP and a normal address (google dns ip)
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(('8.8.8.8', 0))
-        local_ips.append(s.getsockname()[0])
-    except:
-        pass
-
-    # Get ip by '' hostname . Not supported on all platforms.
-    try:
-        local_ips += socket.gethostbyname_ex('')[2]
-    except:
-        pass
+    for thread in threads:
+        if thread.value:
+            local_ips += thread.value
 
     # Delete duplicates
     local_ips = list(set(local_ips))
+
 
     # Probably we looking for an ip starting with 192
     local_ips = sorted(local_ips, key=lambda a: a.startswith("192"), reverse=True)
@@ -216,10 +232,10 @@ def _create_close_message(local_ip,
 
 
 def _parse_for_errors(soap_response):
-    logging.debug(soap_response.status)
+    logger.debug(soap_response.status)
     if soap_response.status >= 400:
         response_data = soap_response.read()
-        logging.debug(response_data)
+        logger.debug(response_data)
         try:
             err_dom = parseString(response_data)
             err_code = _get_first_child_data(err_dom.getElementsByTagName(
@@ -249,9 +265,9 @@ def _send_soap_request(location, upnp_schema, control_path, soap_fn,
         ),
         'Content-Type': 'text/xml'
     }
-    logging.debug("Sending UPnP request to {0}:{1}...".format(
+    logger.debug("Sending UPnP request to {0}:{1}...".format(
         location.hostname, location.port))
-    conn = httplib.HTTPConnection(location.hostname, location.port)
+    conn = http.client.HTTPConnection(location.hostname, location.port)
     conn.request('POST', control_path, soap_message, headers)
 
     response = conn.getresponse()
@@ -280,7 +296,7 @@ def _send_requests(messages, location, upnp_schema, control_path):
 
 
 def _orchestrate_soap_request(ip, port, msg_fn, desc=None, protos=("TCP", "UDP")):
-    logging.debug("Trying using local ip: %s" % ip)
+    logger.debug("Trying using local ip: %s" % ip)
     idg_data = _collect_idg_data(ip)
 
     soap_messages = [
@@ -309,7 +325,7 @@ def _communicate_with_igd(port=15441,
                 _orchestrate_soap_request(local_ip, port, fn, desc, protos)
                 return True
             except Exception as e:
-                logging.debug('Upnp request using "{0}" failed: {1}'.format(local_ip, e))
+                logger.debug('Upnp request using "{0}" failed: {1}'.format(local_ip, e))
                 gevent.sleep(1)
         return False
 
@@ -339,10 +355,12 @@ def _communicate_with_igd(port=15441,
             'Failed to communicate with igd using port {0} on local machine after {1} tries.'.format(
                 port, retries))
 
+    return success
+
 
 def ask_to_open_port(port=15441, desc="UpnpPunch", retries=3, protos=("TCP", "UDP")):
-    logging.debug("Trying to open port %d." % port)
-    _communicate_with_igd(port=port,
+    logger.debug("Trying to open port %d." % port)
+    return _communicate_with_igd(port=port,
                           desc=desc,
                           retries=retries,
                           fn=_create_open_message,
@@ -350,9 +368,9 @@ def ask_to_open_port(port=15441, desc="UpnpPunch", retries=3, protos=("TCP", "UD
 
 
 def ask_to_close_port(port=15441, desc="UpnpPunch", retries=3, protos=("TCP", "UDP")):
-    logging.debug("Trying to close port %d." % port)
+    logger.debug("Trying to close port %d." % port)
     # retries=1 because multiple successes cause 500 response and failure
-    _communicate_with_igd(port=port,
+    return _communicate_with_igd(port=port,
                           desc=desc,
                           retries=retries,
                           fn=_create_close_message,
@@ -362,14 +380,16 @@ def ask_to_close_port(port=15441, desc="UpnpPunch", retries=3, protos=("TCP", "U
 if __name__ == "__main__":
     from gevent import monkey
     monkey.patch_all()
-    logging.getLogger().setLevel(logging.DEBUG)
+    logging.basicConfig(level=logging.DEBUG)
     import time
 
     s = time.time()
-    print "Opening port..."
-    print ask_to_open_port(15443, "ZeroNet", protos=["TCP"])
-    print "Done in", time.time() - s
+    print("Opening port...")
+    print("Success:", ask_to_open_port(15443, "ZeroNet", protos=["TCP"]))
+    print("Done in", time.time() - s)
 
-    print "Closing port..."
-    print ask_to_close_port(15443, "ZeroNet", protos=["TCP"])
-    print "Done in", time.time() - s
+
+    print("Closing port...")
+    print("Success:", ask_to_close_port(15443, "ZeroNet", protos=["TCP"]))
+    print("Done in", time.time() - s)
+

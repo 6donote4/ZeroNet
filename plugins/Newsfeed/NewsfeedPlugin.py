@@ -2,7 +2,7 @@ import time
 import re
 
 from Plugin import PluginManager
-from Db import DbQuery
+from Db.DbQuery import DbQuery
 from Debug import Debug
 from util import helper
 
@@ -24,13 +24,11 @@ class UiWebsocketPlugin(object):
         self.response(to, "ok")
 
     def actionFeedListFollow(self, to):
-        feeds = self.user.sites[self.site.address].get("follow", {})
+        feeds = self.user.sites.get(self.site.address, {}).get("follow", {})
         self.response(to, feeds)
 
+    @flag.admin
     def actionFeedQuery(self, to, limit=10, day_limit=3):
-        if "ADMIN" not in self.site.settings["permissions"]:
-            return self.response(to, "FeedQuery not allowed")
-
         from Site import SiteManager
         rows = []
         stats = []
@@ -38,7 +36,7 @@ class UiWebsocketPlugin(object):
         total_s = time.time()
         num_sites = 0
 
-        for address, site_data in self.user.sites.items():
+        for address, site_data in list(self.user.sites.items()):
             feeds = site_data.get("follow")
             if not feeds:
                 continue
@@ -46,7 +44,7 @@ class UiWebsocketPlugin(object):
                 self.log.debug("Invalid feed for site %s" % address)
                 continue
             num_sites += 1
-            for name, query_set in feeds.iteritems():
+            for name, query_set in feeds.items():
                 site = SiteManager.site_manager.get(address)
                 if not site or not site.storage.has_db:
                     continue
@@ -79,7 +77,7 @@ class UiWebsocketPlugin(object):
 
                 for row in res:
                     row = dict(row)
-                    if not isinstance(row["date_added"], (int, long, float, complex)):
+                    if not isinstance(row["date_added"], (int, float, complex)):
                         self.log.debug("Invalid date_added from site %s: %r" % (address, row["date_added"]))
                         continue
                     if row["date_added"] > 1000000000000:  # Formatted as millseconds
@@ -91,7 +89,7 @@ class UiWebsocketPlugin(object):
                     row["feed_name"] = name
                     rows.append(row)
                 stats.append({"site": site.address, "feed_name": name, "taken": round(time.time() - s, 3)})
-                time.sleep(0.0001)
+                time.sleep(0.001)
         return self.response(to, {"rows": rows, "stats": stats, "num": len(rows), "sites": num_sites, "taken": round(time.time() - total_s, 3)})
 
     def parseSearch(self, search):
@@ -117,7 +115,7 @@ class UiWebsocketPlugin(object):
 
         search_text, filters = self.parseSearch(search)
 
-        for address, site in SiteManager.site_manager.list().iteritems():
+        for address, site in SiteManager.site_manager.list().items():
             if not site.storage.has_db:
                 continue
 
@@ -138,7 +136,7 @@ class UiWebsocketPlugin(object):
 
             num_sites += 1
 
-            for name, query in feeds.iteritems():
+            for name, query in feeds.items():
                 s = time.time()
                 try:
                     db_query = DbQuery(query)
@@ -163,13 +161,13 @@ class UiWebsocketPlugin(object):
                     db_query.parts["LIMIT"] = str(limit)
 
                     res = site.storage.query(str(db_query), params)
-                except Exception, err:
+                except Exception as err:
                     self.log.error("%s feed query %s error: %s" % (address, name, Debug.formatException(err)))
                     stats.append({"site": site.address, "feed_name": name, "error": str(err), "query": query})
                     continue
                 for row in res:
                     row = dict(row)
-                    if row["date_added"] > time.time() + 120:
+                    if not row["date_added"] or row["date_added"] > time.time() + 120:
                         continue  # Feed item is in the future, skip it
                     row["site"] = address
                     row["feed_name"] = name

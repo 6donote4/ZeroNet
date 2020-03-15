@@ -6,7 +6,7 @@ import gevent
 
 from util import helper
 from Plugin import PluginManager
-import ContentDbPlugin
+from . import ContentDbPlugin
 
 
 # We can only import plugin host clases after the plugins are loaded
@@ -17,34 +17,46 @@ def importPluginnedClasses():
 
 
 def processAccessLog():
+    global access_log
     if access_log:
         content_db = ContentDbPlugin.content_db
+        if not content_db.conn:
+            return False
+
+        s = time.time()
+        access_log_prev = access_log
+        access_log = collections.defaultdict(dict)
         now = int(time.time())
         num = 0
-        for site_id in access_log:
+        for site_id in access_log_prev:
             content_db.execute(
                 "UPDATE file_optional SET time_accessed = %s WHERE ?" % now,
-                {"site_id": site_id, "inner_path": access_log[site_id].keys()}
+                {"site_id": site_id, "inner_path": list(access_log_prev[site_id].keys())}
             )
-            num += len(access_log[site_id])
-        access_log.clear()
+            num += len(access_log_prev[site_id])
+
+        content_db.log.debug("Inserted %s web request stat in %.3fs" % (num, time.time() - s))
 
 
 def processRequestLog():
+    global request_log
     if request_log:
         content_db = ContentDbPlugin.content_db
-        cur = content_db.getCursor()
+        if not content_db.conn:
+            return False
+
+        s = time.time()
+        request_log_prev = request_log
+        request_log = collections.defaultdict(lambda: collections.defaultdict(int))  # {site_id: {inner_path1: 1, inner_path2: 1...}}
         num = 0
-        cur.execute("BEGIN")
-        for site_id in request_log:
-            for inner_path, uploaded in request_log[site_id].iteritems():
+        for site_id in request_log_prev:
+            for inner_path, uploaded in request_log_prev[site_id].items():
                 content_db.execute(
                     "UPDATE file_optional SET uploaded = uploaded + %s WHERE ?" % uploaded,
                     {"site_id": site_id, "inner_path": inner_path}
                 )
                 num += 1
-        cur.execute("END")
-        request_log.clear()
+        content_db.log.debug("Inserted %s file request stat in %.3fs" % (num, time.time() - s))
 
 
 if "access_log" not in locals().keys():  # To keep between module reloads
@@ -74,16 +86,28 @@ class ContentManagerPlugin(object):
         return super(ContentManagerPlugin, self).optionalDownloaded(inner_path, hash_id, size, own)
 
     def optionalRemoved(self, inner_path, hash_id, size=None):
-        self.contents.db.execute(
+        res = self.contents.db.execute(
             "UPDATE file_optional SET is_downloaded = 0, is_pinned = 0, peer = peer - 1 WHERE site_id = :site_id AND inner_path = :inner_path AND is_downloaded = 1",
             {"site_id": self.contents.db.site_ids[self.site.address], "inner_path": inner_path}
         )
 
-        if self.contents.db.cur.cursor.rowcount > 0:
+        if res.rowcount > 0:
             back = super(ContentManagerPlugin, self).optionalRemoved(inner_path, hash_id, size)
             # Re-add to hashfield if we have other file with the same hash_id
             if self.isDownloaded(hash_id=hash_id, force_check_db=True):
                 self.hashfield.appendHashId(hash_id)
+        else:
+            back = False
+        self.cache_is_pinned = {}
+        return back
+
+    def optionalRenamed(self, inner_path_old, inner_path_new):
+        back = super(ContentManagerPlugin, self).optionalRenamed(inner_path_old, inner_path_new)
+        self.cache_is_pinned = {}
+        self.contents.db.execute(
+            "UPDATE file_optional SET inner_path = :inner_path_new WHERE site_id = :site_id AND inner_path = :inner_path_old",
+            {"site_id": self.contents.db.site_ids[self.site.address], "inner_path_old": inner_path_old, "inner_path_new": inner_path_new}
+        )
         return back
 
     def isDownloaded(self, inner_path=None, hash_id=None, force_check_db=False):
@@ -101,7 +125,7 @@ class ContentManagerPlugin(object):
                 {"site_id": self.contents.db.site_ids[self.site.address], "hash_id": hash_id}
             )
         row = res.fetchone()
-        if row and row[0]:
+        if row and row["is_downloaded"]:
             return True
         else:
             return False
@@ -191,7 +215,7 @@ class SitePlugin(object):
         if is_downloadable:
             return is_downloadable
 
-        for path in self.settings.get("optional_help", {}).iterkeys():
+        for path in self.settings.get("optional_help", {}).keys():
             if inner_path.startswith(path):
                 return True
 

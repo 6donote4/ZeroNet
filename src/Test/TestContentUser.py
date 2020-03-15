@@ -1,5 +1,5 @@
 import json
-from cStringIO import StringIO
+import io
 
 import pytest
 
@@ -91,7 +91,7 @@ class TestContentUser:
         data_dict = site.storage.loadJson(user_inner_path)
         users_content = site.content_manager.contents["data/users/content.json"]
 
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         assert site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
 
         # Test error on 15k data.json
@@ -100,10 +100,10 @@ class TestContentUser:
         data_dict["signs"] = {
             "1TeSTvb4w2PWE81S2rEELgmX2GCCExQGT": CryptBitcoin.sign(json.dumps(data_dict, sort_keys=True), privatekey)
         }
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
-        assert "Include too large" in str(err)
+        assert "Include too large" in str(err.value)
 
         # Give more space based on address
         users_content["user_contents"]["permissions"]["1CjfbrbwtP8Y2QjPy12vpTATkUT7oSiPQ9"] = {"max_size": 20000}
@@ -111,7 +111,7 @@ class TestContentUser:
         data_dict["signs"] = {
             "1TeSTvb4w2PWE81S2rEELgmX2GCCExQGT": CryptBitcoin.sign(json.dumps(data_dict, sort_keys=True), privatekey)
         }
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         assert site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
 
     def testVerify(self, site):
@@ -120,7 +120,7 @@ class TestContentUser:
         data_dict = site.storage.loadJson(user_inner_path)
         users_content = site.content_manager.contents["data/users/content.json"]
 
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         assert site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
 
         # Test max size exception by setting allowed to 0
@@ -131,11 +131,11 @@ class TestContentUser:
         users_content["user_contents"]["permission_rules"][".*"]["max_size"] = 0
         rules = site.content_manager.getRules(user_inner_path, data_dict)
         assert rules["max_size"] == 0
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
 
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
-        assert "Include too large" in str(err)
+        assert "Include too large" in str(err.value)
         users_content["user_contents"]["permission_rules"][".*"]["max_size"] = 10000  # Reset
 
         # Test max optional size exception
@@ -145,7 +145,7 @@ class TestContentUser:
         data_dict["signs"] = {
             "1TeSTvb4w2PWE81S2rEELgmX2GCCExQGT": CryptBitcoin.sign(json.dumps(data_dict, sort_keys=True), privatekey)
         }
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         assert site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
 
         # 100 MB gif = Not allowed
@@ -154,10 +154,10 @@ class TestContentUser:
         data_dict["signs"] = {
             "1TeSTvb4w2PWE81S2rEELgmX2GCCExQGT": CryptBitcoin.sign(json.dumps(data_dict, sort_keys=True), privatekey)
         }
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
-        assert "Include optional files too large" in str(err)
+        assert "Include optional files too large" in str(err.value)
         data_dict["files_optional"]["peanut-butter-jelly-time.gif"]["size"] = 1024 * 1024  # Reset
 
         # hello.exe = Not allowed
@@ -166,10 +166,10 @@ class TestContentUser:
         data_dict["signs"] = {
             "1TeSTvb4w2PWE81S2rEELgmX2GCCExQGT": CryptBitcoin.sign(json.dumps(data_dict, sort_keys=True), privatekey)
         }
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
-        assert "Optional file not allowed" in str(err)
+        assert "Optional file not allowed" in str(err.value)
         del data_dict["files_optional"]["hello.exe"]  # Reset
 
         # Includes not allowed in user content
@@ -178,10 +178,10 @@ class TestContentUser:
         data_dict["signs"] = {
             "1TeSTvb4w2PWE81S2rEELgmX2GCCExQGT": CryptBitcoin.sign(json.dumps(data_dict, sort_keys=True), privatekey)
         }
-        data = StringIO(json.dumps(data_dict))
+        data = io.BytesIO(json.dumps(data_dict).encode())
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(user_inner_path, data, ignore_same=False)
-        assert "Includes not allowed" in str(err)
+        assert "Includes not allowed" in str(err.value)
 
     def testCert(self, site):
         # user_addr = "1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C"
@@ -227,7 +227,7 @@ class TestContentUser:
         # Test user cert
         assert site.content_manager.verifyFile(
             "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-            StringIO(json.dumps(signed_content)), ignore_same=False
+            io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
         )
 
         # Test banned user
@@ -236,9 +236,9 @@ class TestContentUser:
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(
                 "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-                StringIO(json.dumps(signed_content)), ignore_same=False
+                io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
             )
-        assert "Valid signs: 0/1" in str(err)
+        assert "Valid signs: 0/1" in str(err.value)
         del site.content_manager.contents["data/users/content.json"]["user_contents"]["permissions"][cert_user_id]  # Reset
 
         # Test invalid cert
@@ -251,9 +251,9 @@ class TestContentUser:
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(
                 "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-                StringIO(json.dumps(signed_content)), ignore_same=False
+                io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
             )
-        assert "Invalid cert" in str(err)
+        assert "Invalid cert" in str(err.value)
 
         # Test banned user, signed by the site owner
         user_content["cert_sign"] = CryptBitcoin.sign("1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C#%s/%s" % (
@@ -270,7 +270,7 @@ class TestContentUser:
         }
         assert site.content_manager.verifyFile(
             "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-            StringIO(json.dumps(user_content)), ignore_same=False
+            io.BytesIO(json.dumps(user_content).encode()), ignore_same=False
         )
 
     def testMissingCert(self, site):
@@ -297,7 +297,7 @@ class TestContentUser:
 
         assert site.content_manager.verifyFile(
             "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-            StringIO(json.dumps(signed_content)), ignore_same=False
+            io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
         )
 
         # Test invalid cert_user_id
@@ -311,9 +311,9 @@ class TestContentUser:
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(
                 "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-                StringIO(json.dumps(signed_content)), ignore_same=False
+                io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
             )
-        assert "Invalid domain in cert_user_id" in str(err)
+        assert "Invalid domain in cert_user_id" in str(err.value)
 
         # Test removed cert
         del user_content["cert_user_id"]
@@ -328,9 +328,9 @@ class TestContentUser:
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(
                 "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-                StringIO(json.dumps(signed_content)), ignore_same=False
+                io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
             )
-        assert "Missing cert_user_id" in str(err)
+        assert "Missing cert_user_id" in str(err.value)
 
 
     def testCertSignersPattern(self, site):
@@ -355,7 +355,7 @@ class TestContentUser:
 
         assert site.content_manager.verifyFile(
             "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-            StringIO(json.dumps(signed_content)), ignore_same=False
+            io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
         )
 
         # Cert does not matches the pattern
@@ -364,9 +364,9 @@ class TestContentUser:
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(
                 "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-                StringIO(json.dumps(signed_content)), ignore_same=False
+                io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
             )
-        assert "Invalid cert signer: 14wgQ4VDDZNoRMFF4yCDuTrBSHmYhL3bet" in str(err)
+        assert "Invalid cert signer: 14wgQ4VDDZNoRMFF4yCDuTrBSHmYhL3bet" in str(err.value)
 
         # Removed cert_signers_pattern
         del rules_content["user_contents"]["cert_signers_pattern"]
@@ -374,9 +374,9 @@ class TestContentUser:
         with pytest.raises(VerifyError) as err:
             site.content_manager.verifyFile(
                 "data/users/1J6UrZMkarjVg5ax9W4qThir3BFUikbW6C/content.json",
-                StringIO(json.dumps(signed_content)), ignore_same=False
+                io.BytesIO(json.dumps(signed_content).encode()), ignore_same=False
             )
-        assert "Invalid cert signer: 14wgQ4VDDZNoRMFF4yCDuTrBSHmYhL3bet" in str(err)
+        assert "Invalid cert signer: 14wgQ4VDDZNoRMFF4yCDuTrBSHmYhL3bet" in str(err.value)
 
 
     def testNewFile(self, site):

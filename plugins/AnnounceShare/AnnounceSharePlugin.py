@@ -75,7 +75,7 @@ class TrackerStorage(object):
 
     def getWorkingTrackers(self, type="shared"):
         trackers = {
-            key: tracker for key, tracker in self.getTrackers(type).iteritems()
+            key: tracker for key, tracker in self.getTrackers(type).items()
             if tracker["time_success"] > time.time() - 60 * 60
         }
         return trackers
@@ -95,14 +95,14 @@ class TrackerStorage(object):
 
         trackers = self.getTrackers()
         self.log.debug("Loaded %s shared trackers" % len(trackers))
-        for address, tracker in trackers.items():
+        for address, tracker in list(trackers.items()):
             tracker["num_error"] = 0
             if not address.startswith("zero://"):
                 del trackers[address]
 
     def save(self):
         s = time.time()
-        helper.atomicWrite(self.file_path, json.dumps(self.file_content, indent=2, sort_keys=True))
+        helper.atomicWrite(self.file_path, json.dumps(self.file_content, indent=2, sort_keys=True).encode("utf8"))
         self.log.debug("Saved in %.3fs" % (time.time() - s))
 
     def discoverTrackers(self, peers):
@@ -120,6 +120,8 @@ class TrackerStorage(object):
 
             num_success += 1
             for tracker_address in res["trackers"]:
+                if type(tracker_address) is bytes:  # Backward compatibilitys
+                    tracker_address = tracker_address.decode("utf8")
                 added = self.onTrackerFound(tracker_address)
                 if added:  # Only add one tracker from one source
                     break
@@ -144,7 +146,7 @@ class SiteAnnouncerPlugin(object):
             tracker_storage.time_discover = time.time()
             gevent.spawn(tracker_storage.discoverTrackers, self.site.getConnectedPeers())
         trackers = super(SiteAnnouncerPlugin, self).getTrackers()
-        shared_trackers = tracker_storage.getTrackers("shared").keys()
+        shared_trackers = list(tracker_storage.getTrackers("shared").keys())
         if shared_trackers:
             return trackers + shared_trackers
         else:
@@ -164,7 +166,7 @@ class SiteAnnouncerPlugin(object):
 @PluginManager.registerTo("FileRequest")
 class FileRequestPlugin(object):
     def actionGetTrackers(self, params):
-        shared_trackers = tracker_storage.getWorkingTrackers("shared").keys()
+        shared_trackers = list(tracker_storage.getWorkingTrackers("shared").keys())
         self.response({"trackers": shared_trackers})
 
 

@@ -4,7 +4,6 @@ import time
 import json
 import collections
 import itertools
-import socket
 
 # Third party modules
 import gevent
@@ -12,7 +11,7 @@ import gevent
 from Debug import Debug
 from Config import config
 from util import RateLimit
-from util import StreamingMsgpack
+from util import Msgpack
 from util import helper
 from Plugin import PluginManager
 from contextlib import closing
@@ -103,42 +102,61 @@ class FileRequest(object):
     # Update a site file request
     def actionUpdate(self, params):
         site = self.sites.get(params["site"])
-        if not site or not site.settings["serving"]:  # Site unknown or not serving
+        if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})
             self.connection.badAction(1)
             self.connection.badAction(5)
             return False
 
         inner_path = params.get("inner_path", "")
+        current_content_modified = site.content_manager.contents.get(inner_path, {}).get("modified", 0)
+        body = params["body"]
 
         if not inner_path.endswith("content.json"):
             self.response({"error": "Only content.json update allowed"})
             self.connection.badAction(5)
             return
 
-        try:
-            content = json.loads(params["body"])
-        except Exception, err:
-            self.log.debug("Update for %s is invalid JSON: %s" % (inner_path, err))
-            self.response({"error": "File invalid JSON"})
-            self.connection.badAction(5)
-            return
-
-        file_uri = "%s/%s:%s" % (site.address, inner_path, content["modified"])
-
-        if self.server.files_parsing.get(file_uri):  # Check if we already working on it
-            valid = None  # Same file
-        else:
+        should_validate_content = True
+        if "modified" in params and params["modified"] <= current_content_modified:
+            should_validate_content = False
+            valid = None  # Same or earlier content as we have
+        elif not body:  # No body sent, we have to download it first
+            site.log.debug("Missing body from update for file %s, downloading ..." % inner_path)
+            peer = site.addPeer(self.connection.ip, self.connection.port, return_peer=True, source="update")  # Add or get peer
             try:
-                valid = site.content_manager.verifyFile(inner_path, content)
-            except Exception, err:
-                self.log.debug("Update for %s is invalid: %s" % (inner_path, err))
-                valid = False
+                body = peer.getFile(site.address, inner_path).read()
+            except Exception as err:
+                site.log.debug("Can't download updated file %s: %s" % (inner_path, err))
+                self.response({"error": "File invalid update: Can't download updaed file"})
+                self.connection.badAction(5)
+                return
+
+        if should_validate_content:
+            try:
+                content = json.loads(body.decode())
+            except Exception as err:
+                site.log.debug("Update for %s is invalid JSON: %s" % (inner_path, err))
+                self.response({"error": "File invalid JSON"})
+                self.connection.badAction(5)
+                return
+
+            file_uri = "%s/%s:%s" % (site.address, inner_path, content["modified"])
+
+            if self.server.files_parsing.get(file_uri):  # Check if we already working on it
+                valid = None  # Same file
+            else:
+                try:
+                    valid = site.content_manager.verifyFile(inner_path, content)
+                except Exception as err:
+                    site.log.debug("Update for %s is invalid: %s" % (inner_path, err))
+                    error = err
+                    valid = False
 
         if valid is True:  # Valid and changed
             site.log.info("Update for %s looks valid, saving..." % inner_path)
             self.server.files_parsing[file_uri] = True
-            site.storage.write(inner_path, params["body"])
+            site.storage.write(inner_path, body)
             del params["body"]
 
             site.onFileDone(inner_path)  # Trigger filedone
@@ -169,7 +187,7 @@ class FileRequest(object):
                 if inner_path in site.content_manager.contents:
                     peer.last_content_json_update = site.content_manager.contents[inner_path]["modified"]
                 if config.verbose:
-                    self.log.debug(
+                    site.log.debug(
                         "Same version, adding new peer for locked files: %s, tasks: %s" %
                         (peer.key, len(site.worker_manager.tasks))
                     )
@@ -182,7 +200,7 @@ class FileRequest(object):
             self.connection.badAction()
 
         else:  # Invalid sign or sha hash
-            self.response({"error": "File invalid: %s" % err})
+            self.response({"error": "File %s invalid: %s" % (inner_path, error)})
             self.connection.badAction(5)
 
     def isReadable(self, site, inner_path, file, pos):
@@ -191,7 +209,7 @@ class FileRequest(object):
     # Send file content request
     def handleGetFile(self, params, streaming=False):
         site = self.sites.get(params["site"])
-        if not site or not site.settings["serving"]:  # Site unknown or not serving
+        if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})
             self.connection.badAction(5)
             return False
@@ -200,7 +218,7 @@ class FileRequest(object):
             if streaming:
                 file_obj = site.storage.open(params["inner_path"])
             else:
-                file_obj = StreamingMsgpack.FilePart(file_path, "rb")
+                file_obj = Msgpack.FilePart(file_path, "rb")
 
             with file_obj as file:
                 file.seek(params["location"])
@@ -217,7 +235,6 @@ class FileRequest(object):
 
                 if not streaming:
                     file.read_bytes = read_bytes
-
 
                 if params["location"] > file_size:
                     self.connection.badAction(5)
@@ -251,13 +268,17 @@ class FileRequest(object):
 
             return {"bytes_sent": bytes_sent, "file_size": file_size, "location": params["location"]}
 
-        except RequestError, err:
-            self.log.debug("GetFile %s %s request error: %s" % (self.connection, params["inner_path"], Debug.formatException(err)))
+        except RequestError as err:
+            self.log.debug("GetFile %s %s %s request error: %s" % (self.connection, params["site"], params["inner_path"], Debug.formatException(err)))
             self.response({"error": "File read error: %s" % err})
-        except Exception, err:
+        except OSError as err:
             if config.verbose:
                 self.log.debug("GetFile read error: %s" % Debug.formatException(err))
             self.response({"error": "File read error"})
+            return False
+        except Exception as err:
+            self.log.error("GetFile exception: %s" % Debug.formatException(err))
+            self.response({"error": "File read exception"})
             return False
 
     def actionGetFile(self, params):
@@ -269,7 +290,7 @@ class FileRequest(object):
     # Peer exchange request
     def actionPex(self, params):
         site = self.sites.get(params["site"])
-        if not site or not site.settings["serving"]:  # Site unknown or not serving
+        if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})
             self.connection.badAction(5)
             return False
@@ -306,7 +327,7 @@ class FileRequest(object):
             if config.verbose:
                 self.log.debug(
                     "Added %s peers to %s using pex, sending back %s" %
-                    (added, site, {key: len(val) for key, val in packed_peers.iteritems()})
+                    (added, site, {key: len(val) for key, val in packed_peers.items()})
                 )
 
         back = {
@@ -320,7 +341,7 @@ class FileRequest(object):
     # Get modified content.json files since
     def actionListModified(self, params):
         site = self.sites.get(params["site"])
-        if not site or not site.settings["serving"]:  # Site unknown or not serving
+        if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})
             self.connection.badAction(5)
             return False
@@ -335,7 +356,7 @@ class FileRequest(object):
 
     def actionGetHashfield(self, params):
         site = self.sites.get(params["site"])
-        if not site or not site.settings["serving"]:  # Site unknown or not serving
+        if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})
             self.connection.badAction(5)
             return False
@@ -347,13 +368,13 @@ class FileRequest(object):
 
         peer.time_my_hashfield_sent = time.time()  # Don't send again if not changed
 
-        self.response({"hashfield_raw": site.content_manager.hashfield.tostring()})
+        self.response({"hashfield_raw": site.content_manager.hashfield.tobytes()})
 
     def findHashIds(self, site, hash_ids, limit=100):
         back = collections.defaultdict(lambda: collections.defaultdict(list))
         found = site.worker_manager.findOptionalHashIds(hash_ids, limit=limit)
 
-        for hash_id, peers in found.iteritems():
+        for hash_id, peers in found.items():
             for peer in peers:
                 ip_type = helper.getIpType(peer.ip)
                 if len(back[ip_type][hash_id]) < 20:
@@ -363,7 +384,7 @@ class FileRequest(object):
     def actionFindHashIds(self, params):
         site = self.sites.get(params["site"])
         s = time.time()
-        if not site or not site.settings["serving"]:  # Site unknown or not serving
+        if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})
             self.connection.badAction(5)
             return False
@@ -385,13 +406,13 @@ class FileRequest(object):
         if config.verbose:
             self.log.debug(
                 "Found: %s for %s hashids in %.3fs" %
-                ({key: len(val) for key, val in back.iteritems()}, len(params["hash_ids"]), time.time() - s)
+                ({key: len(val) for key, val in back.items()}, len(params["hash_ids"]), time.time() - s)
             )
         self.response({"peers": back["ipv4"], "peers_onion": back["onion"], "peers_ipv6": back["ipv6"], "my": my_hashes})
 
     def actionSetHashfield(self, params):
         site = self.sites.get(params["site"])
-        if not site or not site.settings["serving"]:  # Site unknown or not serving
+        if not site or not site.isServing():  # Site unknown or not serving
             self.response({"error": "Unknown site"})
             self.connection.badAction(5)
             return False
@@ -400,12 +421,12 @@ class FileRequest(object):
         peer = site.addPeer(self.connection.ip, self.connection.port, return_peer=True, connection=self.connection, source="request")
         if not peer.connection:
             peer.connect(self.connection)
-        peer.hashfield.replaceFromString(params["hashfield_raw"])
+        peer.hashfield.replaceFromBytes(params["hashfield_raw"])
         self.response({"ok": "Updated"})
 
     # Send a simple Pong! answer
     def actionPing(self, params):
-        self.response("Pong!")
+        self.response(b"Pong!")
 
     # Check requested port of the other peer
     def actionCheckport(self, params):

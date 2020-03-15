@@ -1,5 +1,5 @@
 import socket
-from urlparse import urlparse
+from urllib.parse import urlparse
 
 import pytest
 import mock
@@ -10,7 +10,7 @@ from util import UpnpPunch as upnp
 @pytest.fixture
 def mock_socket():
     mock_socket = mock.MagicMock()
-    mock_socket.recv = mock.MagicMock(return_value='Hello')
+    mock_socket.recv = mock.MagicMock(return_value=b'Hello')
     mock_socket.bind = mock.MagicMock()
     mock_socket.send_to = mock.MagicMock()
 
@@ -79,12 +79,12 @@ class TestUpnpPunch(object):
             upnp._retrieve_location_from_ssdp(rsp)
 
     def test_retrieve_igd_profile(self, url_obj):
-        with mock.patch('urllib2.urlopen') as mock_urlopen:
+        with mock.patch('urllib.request.urlopen') as mock_urlopen:
             upnp._retrieve_igd_profile(url_obj)
             mock_urlopen.assert_called_with(url_obj.geturl(), timeout=5)
 
     def test_retrieve_igd_profile_timeout(self, url_obj):
-        with mock.patch('urllib2.urlopen') as mock_urlopen:
+        with mock.patch('urllib.request.urlopen') as mock_urlopen:
             mock_urlopen.side_effect = socket.error('Timeout error')
             with pytest.raises(upnp.IGDError):
                 upnp._retrieve_igd_profile(url_obj)
@@ -126,9 +126,9 @@ class TestUpnpPunch(object):
 
     def test_parse_for_errors_bad_rsp(self, httplib_response):
         rsp = httplib_response(status=500)
-        with pytest.raises(upnp.IGDError) as exc:
+        with pytest.raises(upnp.IGDError) as err:
             upnp._parse_for_errors(rsp)
-        assert 'Unable to parse' in str(exc)
+        assert 'Unable to parse' in str(err.value)
 
     def test_parse_for_errors_error(self, httplib_response):
         soap_error = ('<document>'
@@ -136,9 +136,9 @@ class TestUpnpPunch(object):
                       '<errorDescription>Bad request</errorDescription>'
                       '</document>')
         rsp = httplib_response(status=500, body=soap_error)
-        with pytest.raises(upnp.IGDError) as exc:
+        with pytest.raises(upnp.IGDError) as err:
             upnp._parse_for_errors(rsp)
-        assert 'SOAP request error' in str(exc)
+        assert 'SOAP request error' in str(err.value)
 
     def test_parse_for_errors_good_rsp(self, httplib_response):
         rsp = httplib_response(status=200)
@@ -176,7 +176,7 @@ class TestUpnpPunch(object):
 
         soap_msg = mock_send_requests.call_args[0][0][0][0]
 
-        assert result is None
+        assert result is True
 
         assert mock_collect_idg.called
         assert '192.168.0.12' in soap_msg

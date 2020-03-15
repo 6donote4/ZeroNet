@@ -3,11 +3,13 @@ import json
 import logging
 import collections
 import time
+import hashlib
 
 from Debug import Debug
 from Plugin import PluginManager
 from Config import config
 from util import helper
+
 
 class ContentFilterStorage(object):
     def __init__(self, site_manager):
@@ -62,7 +64,7 @@ class ContentFilterStorage(object):
                 )
                 continue
 
-            for key, val in content.iteritems():
+            for key, val in content.items():
                 if type(val) is not dict:
                     continue
 
@@ -105,7 +107,7 @@ class ContentFilterStorage(object):
 
     def save(self):
         s = time.time()
-        helper.atomicWrite(self.file_path, json.dumps(self.file_content, indent=2, sort_keys=True))
+        helper.atomicWrite(self.file_path, json.dumps(self.file_content, indent=2, sort_keys=True).encode("utf8"))
         self.log.debug("Saved in %.3fs" % (time.time() - s))
 
     def isMuted(self, auth_address):
@@ -114,16 +116,38 @@ class ContentFilterStorage(object):
         else:
             return False
 
+    def getSiteAddressHashed(self, address):
+        return "0x" + hashlib.sha256(address.encode("ascii")).hexdigest()
+
     def isSiteblocked(self, address):
         if address in self.file_content["siteblocks"] or address in self.include_filters["siteblocks"]:
             return True
-        else:
-            return False
+        return False
+
+    def getSiteblockDetails(self, address):
+        details = self.file_content["siteblocks"].get(address)
+        if not details:
+            address_sha256 = self.getSiteAddressHashed(address)
+            details = self.file_content["siteblocks"].get(address_sha256)
+
+        if not details:
+            includes = self.file_content.get("includes", {}).values()
+            for include in includes:
+                include_site = self.site_manager.get(include["address"])
+                if not include_site:
+                    continue
+                content = include_site.storage.loadJson(include["inner_path"])
+                details = content.get("siteblocks").get(address)
+                if details:
+                    details["include"] = include
+                    break
+
+        return details
 
     # Search and remove or readd files of an user
     def changeDbs(self, auth_address, action):
         self.log.debug("Mute action %s on user %s" % (action, auth_address))
-        res = self.site_manager.list().values()[0].content_manager.contents.db.execute(
+        res = list(self.site_manager.list().values())[0].content_manager.contents.db.execute(
             "SELECT * FROM content LEFT JOIN site USING (site_id) WHERE inner_path LIKE :inner_path",
             {"inner_path": "%%/%s/%%" % auth_address}
         )

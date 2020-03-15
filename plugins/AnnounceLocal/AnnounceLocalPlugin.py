@@ -4,7 +4,7 @@ import gevent
 
 from Plugin import PluginManager
 from Config import config
-import BroadcastServer
+from . import BroadcastServer
 
 
 @PluginManager.registerTo("SiteAnnouncer")
@@ -42,7 +42,7 @@ class LocalAnnouncer(BroadcastServer.BroadcastServer):
         if force:  # Probably new site added, clean cache
             self.known_peers = {}
 
-        for peer_id, known_peer in self.known_peers.items():
+        for peer_id, known_peer in list(self.known_peers.items()):
             if time.time() - known_peer["found"] > 20 * 60:
                 del(self.known_peers[peer_id])
                 self.log.debug("Timeout, removing from known_peers: %s" % peer_id)
@@ -78,7 +78,7 @@ class LocalAnnouncer(BroadcastServer.BroadcastServer):
 
     def actionSiteListRequest(self, sender, params):
         back = []
-        sites = self.server.sites.values()
+        sites = list(self.server.sites.values())
 
         # Split adresses to group of 100 to avoid UDP size limit
         site_groups = [sites[i:i + 100] for i in range(0, len(sites), 100)]
@@ -120,12 +120,11 @@ class LocalAnnouncer(BroadcastServer.BroadcastServer):
 @PluginManager.registerTo("FileServer")
 class FileServerPlugin(object):
     def __init__(self, *args, **kwargs):
-        res = super(FileServerPlugin, self).__init__(*args, **kwargs)
+        super(FileServerPlugin, self).__init__(*args, **kwargs)
         if config.broadcast_port and config.tor != "always" and not config.disable_udp:
             self.local_announcer = LocalAnnouncer(self, config.broadcast_port)
         else:
             self.local_announcer = None
-        return res
 
     def start(self, *args, **kwargs):
         if self.local_announcer:

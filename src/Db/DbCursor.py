@@ -8,16 +8,14 @@ from util import helper
 
 class DbCursor:
 
-    def __init__(self, conn, db):
-        self.conn = conn
+    def __init__(self, db):
         self.db = db
-        self.cursor = conn.cursor()
         self.logging = False
 
     def execute(self, query, params=None):
         self.db.last_query_time = time.time()
         if isinstance(params, dict) and "?" in query:  # Make easier select and insert by allowing dict params
-            if query.startswith("SELECT") or query.startswith("DELETE") or query.startswith("UPDATE"):
+            if query_type in ("SELECT", "DELETE", "UPDATE"):
                 # Convert param dict to SELECT * FROM table WHERE key = ? AND key2 = ? format
                 query_wheres = []
                 values = []
@@ -35,12 +33,15 @@ class DbCursor:
                         else:
                             query_values = ",".join(["?"] * len(value))
                             values += value
-                        query_wheres.append("%s %s (%s)" %
+                        query_wheres.append(
+                            "%s %s (%s)" %
                             (field, operator, query_values)
                         )
                     else:
                         if key.startswith("not__"):
                             query_wheres.append(key.replace("not__", "") + " != ?")
+                        elif key.endswith("__like"):
+                            query_wheres.append(key.replace("__like", "") + " LIKE ?")
                         elif key.endswith(">"):
                             query_wheres.append(key.replace(">", "") + " > ?")
                         elif key.endswith("<"):
@@ -74,18 +75,40 @@ class DbCursor:
                     new_params[key] = value
 
             params = new_params
+        return query, params
 
+    def execute(self, query, params=None):
+        query = query.strip()
+        while self.db.progress_sleeping or self.db.commiting:
+            time.sleep(0.1)
 
-        s = time.time()
+        self.db.last_query_time = time.time()
 
-        if params:  # Query has parameters
-            res = self.cursor.execute(query, params)
-            if self.logging:
-                self.db.log.debug(query + " " + str(params) + " (Done in %.4f)" % (time.time() - s))
-        else:
-            res = self.cursor.execute(query)
-            if self.logging:
-                self.db.log.debug(query + " (Done in %.4f)" % (time.time() - s))
+        query, params = self.parseQuery(query, params)
+
+        cursor = self.db.getConn().cursor()
+        self.db.cursors.add(cursor)
+        if self.db.lock.locked():
+            self.db.log.debug("Locked for %.3fs" % (time.time() - self.db.lock.time_lock))
+
+        try:
+            s = time.time()
+            self.db.lock.acquire(True)
+            if query.upper().strip("; ") == "VACUUM":
+                self.db.commit("vacuum called")
+            if params:
+                res = cursor.execute(query, params)
+            else:
+                res = cursor.execute(query)
+        finally:
+            self.db.lock.release()
+
+        taken_query = time.time() - s
+        if self.logging or taken_query > 1:
+            if params:  # Query has parameters
+                self.db.log.debug("Query: " + query + " " + str(params) + " (Done in %.4f)" % (time.time() - s))
+            else:
+                self.db.log.debug("Query: " + query + " (Done in %.4f)" % (time.time() - s))
 
         # Log query stats
         if self.db.collect_stats:
@@ -94,7 +117,39 @@ class DbCursor:
             self.db.query_stats[query]["call"] += 1
             self.db.query_stats[query]["time"] += time.time() - s
 
-        return res
+        query_type = query.split(" ", 1)[0].upper()
+        is_update_query = query_type in ["UPDATE", "DELETE", "INSERT", "CREATE"]
+        if not self.db.need_commit and is_update_query:
+            self.db.need_commit = True
+
+        if is_update_query:
+            return cursor
+        else:
+            return res
+
+    def executemany(self, query, params):
+        while self.db.progress_sleeping or self.db.commiting:
+            time.sleep(0.1)
+
+        self.db.last_query_time = time.time()
+
+        s = time.time()
+        cursor = self.db.getConn().cursor()
+        self.db.cursors.add(cursor)
+
+        try:
+            self.db.lock.acquire(True)
+            cursor.executemany(query, params)
+        finally:
+            self.db.lock.release()
+
+        taken_query = time.time() - s
+        if self.logging or taken_query > 0.1:
+            self.db.log.debug("Execute many: %s (Done in %.4f)" % (query, taken_query))
+
+        self.db.need_commit = True
+
+        return cursor
 
     # Creates on updates a database row without incrementing the rowid
     def insertOrUpdate(self, table, query_sets, query_wheres, oninsert={}):
@@ -103,11 +158,11 @@ class DbCursor:
 
         params = query_sets
         params.update(query_wheres)
-        self.cursor.execute(
+        res = self.execute(
             "UPDATE %s SET %s WHERE %s" % (table, ", ".join(sql_sets), " AND ".join(sql_wheres)),
             params
         )
-        if self.cursor.rowcount == 0:
+        if res.rowcount == 0:
             params.update(oninsert)  # Add insert-only fields
             self.execute("INSERT INTO %s ?" % table, params)
 
@@ -137,7 +192,7 @@ class DbCursor:
     def needTable(self, table, cols, indexes=None, version=1):
         current_version = self.db.getTableVersion(table)
         if int(current_version) < int(version):  # Table need update or not extis
-            self.db.log.info("Table %s outdated...version: %s need: %s, rebuilding..." % (table, current_version, version))
+            self.db.log.debug("Table %s outdated...version: %s need: %s, rebuilding..." % (table, current_version, version))
             self.createTable(table, cols)
             if indexes:
                 self.createIndexes(table, indexes)
@@ -183,4 +238,4 @@ class DbCursor:
         return row
 
     def close(self):
-        self.cursor.close()
+        pass

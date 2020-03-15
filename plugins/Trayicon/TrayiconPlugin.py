@@ -8,8 +8,11 @@ from Translate import Translate
 
 allow_reload = False  # No source reload supported in this plugin
 
+
+plugin_dir = os.path.dirname(__file__)
+
 if "_" not in locals():
-    _ = Translate("plugins/Trayicon/languages/")
+    _ = Translate(plugin_dir + "/languages/")
 
 
 @PluginManager.registerTo("Actions")
@@ -17,30 +20,31 @@ class ActionsPlugin(object):
 
     def main(self):
         global notificationicon, winfolders
-        from lib import notificationicon, winfolders
+        from .lib import notificationicon, winfolders
         import gevent.threadpool
+        import main
 
-        self.main = sys.modules["main"]
-
-        fs_encoding = sys.getfilesystemencoding()
+        self.main = main
 
         icon = notificationicon.NotificationIcon(
-            os.path.join(os.path.dirname(os.path.abspath(__file__).decode(fs_encoding)), 'trayicon.ico'),
+            os.path.join(os.path.dirname(os.path.abspath(__file__)), 'trayicon.ico'),
             "ZeroNet %s" % config.version
         )
         self.icon = icon
 
-        if not config.debug:  # Hide console if not in debug mode
-            notificationicon.hideConsole()
-            self.console = False
-        else:
-            self.console = True
+        self.console = False
 
         @atexit.register
         def hideIcon():
-            icon.die()
+            try:
+                icon.die()
+            except Exception as err:
+                print("Error removing trayicon: %s" % err)
 
         ui_ip = config.ui_ip if config.ui_ip != "*" else "127.0.0.1"
+
+        if ":" in ui_ip:
+            ui_ip = "[" + ui_ip + "]"
 
         icon.items = [
             (self.titleIp, False),
@@ -124,30 +128,34 @@ class ActionsPlugin(object):
 
         if not getattr(sys, 'frozen', False):  # Not frozen
             args.insert(0, sys.executable)
-            cwd = os.getcwd().decode(sys.getfilesystemencoding())
+            cwd = os.getcwd()
         else:
-            cwd = os.path.dirname(sys.executable).decode(sys.getfilesystemencoding())
+            cwd = os.path.dirname(sys.executable)
+
+        ignored_args = [
+            "--open_browser", "default_browser",
+            "--dist_type", "bundle_win64"
+        ]
 
         if sys.platform == 'win32':
-            args = ['"%s"' % arg for arg in args if arg]
+            args = ['"%s"' % arg for arg in args if arg and arg not in ignored_args]
         cmd = " ".join(args)
 
         # Dont open browser on autorun
-        cmd = cmd.replace("start.py", "zeronet.py").replace('"--open_browser"', "").replace('"default_browser"', "").strip()
+        cmd = cmd.replace("start.py", "zeronet.py").strip()
         cmd += ' --open_browser ""'
-        cmd = cmd.decode(sys.getfilesystemencoding())
 
-        return u"""
-            @echo off
-            chcp 65001 > nul
-            set PYTHONIOENCODING=utf-8
-            cd /D \"%s\"
-            start "" %s
-        """ % (cwd, cmd)
+        return "\r\n".join([
+            '@echo off',
+            'chcp 65001 > nul',
+            'set PYTHONIOENCODING=utf-8',
+            'cd /D \"%s\"' % cwd,
+            'start "" %s' % cmd
+        ])
 
     def isAutorunEnabled(self):
         path = self.getAutorunPath()
-        return os.path.isfile(path) and open(path).read().decode("utf8") == self.formatAutorun()
+        return os.path.isfile(path) and open(path, "rb").read().decode("utf8") == self.formatAutorun()
 
     def titleAutorun(self):
         translate = _["Start ZeroNet when Windows starts"]
@@ -160,4 +168,4 @@ class ActionsPlugin(object):
         if self.isAutorunEnabled():
             os.unlink(self.getAutorunPath())
         else:
-            open(self.getAutorunPath(), "w").write(self.formatAutorun().encode("utf8"))
+            open(self.getAutorunPath(), "wb").write(self.formatAutorun().encode("utf8"))

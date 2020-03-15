@@ -1,4 +1,4 @@
-import cStringIO as StringIO
+import io
 
 from util import Diff
 
@@ -30,20 +30,26 @@ class TestDiff:
             []
         ) == [("-", 11)]
 
+    def testUtf8(self):
+        assert Diff.diff(
+            ["one", "\xe5\xad\xa6\xe4\xb9\xa0\xe4\xb8\x8b", "two", "three"],
+            ["one", "\xe5\xad\xa6\xe4\xb9\xa0\xe4\xb8\x8b", "two", "three", "four", "five"]
+        ) == [("=", 20), ("+", ["four", "five"])]
+
     def testDiffLimit(self):
-        old_f = StringIO.StringIO("one\ntwo\nthree\nhmm\nsix")
-        new_f = StringIO.StringIO("one\ntwo\nthree\nfour\nfive\nsix")
+        old_f = io.BytesIO(b"one\ntwo\nthree\nhmm\nsix")
+        new_f = io.BytesIO(b"one\ntwo\nthree\nfour\nfive\nsix")
         actions = Diff.diff(list(old_f), list(new_f), limit=1024)
         assert actions
 
-        old_f = StringIO.StringIO("one\ntwo\nthree\nhmm\nsix")
-        new_f = StringIO.StringIO("one\ntwo\nthree\nfour\nfive\nsix"*1024)
+        old_f = io.BytesIO(b"one\ntwo\nthree\nhmm\nsix")
+        new_f = io.BytesIO(b"one\ntwo\nthree\nfour\nfive\nsix"*1024)
         actions = Diff.diff(list(old_f), list(new_f), limit=1024)
         assert actions is False
 
     def testPatch(self):
-        old_f = StringIO.StringIO("one\ntwo\nthree\nhmm\nsix")
-        new_f = StringIO.StringIO("one\ntwo\nthree\nfour\nfive\nsix")
+        old_f = io.BytesIO(b"one\ntwo\nthree\nhmm\nsix")
+        new_f = io.BytesIO(b"one\ntwo\nthree\nfour\nfive\nsix")
         actions = Diff.diff(
             list(old_f),
             list(new_f)

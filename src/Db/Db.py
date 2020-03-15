@@ -4,14 +4,24 @@ import time
 import logging
 import re
 import os
+import atexit
+import threading
+import sys
+import weakref
+import errno
+
 import gevent
 
 from Debug import Debug
-from DbCursor import DbCursor
-from Config import config
+from .DbCursor import DbCursor
 from util import SafeRe
 from util import helper
+from util import ThreadPool
+from Config import config
 
+thread_pool_db = ThreadPool.ThreadPool(config.threads_db)
+
+next_db_id = 0
 opened_dbs = []
 
 
@@ -22,57 +32,151 @@ def dbCleanup():
         for db in opened_dbs[:]:
             idle = time.time() - db.last_query_time
             if idle > 60 * 5 and db.close_idle:
-                db.close()
+                db.close("Cleanup")
+
+
+def dbCommitCheck():
+    while 1:
+        time.sleep(5)
+        for db in opened_dbs[:]:
+            if not db.need_commit:
+                continue
+
+            success = db.commit("Interval")
+            if success:
+                db.need_commit = False
+            time.sleep(0.1)
+
+
+def dbCloseAll():
+    for db in opened_dbs[:]:
+        db.close("Close all")
+
 
 gevent.spawn(dbCleanup)
+gevent.spawn(dbCommitCheck)
+atexit.register(dbCloseAll)
+
+
+class DbTableError(Exception):
+    def __init__(self, message, table):
+        super().__init__(message)
+        self.table = table
 
 
 class Db(object):
 
     def __init__(self, schema, db_path, close_idle=False):
+        global next_db_id
         self.db_path = db_path
         self.db_dir = os.path.dirname(db_path) + "/"
         self.schema = schema
         self.schema["version"] = self.schema.get("version", 1)
         self.conn = None
         self.cur = None
-        self.log = logging.getLogger("Db:%s" % schema["db_name"])
+        self.cursors = weakref.WeakSet()
+        self.id = next_db_id
+        next_db_id += 1
+        self.progress_sleeping = False
+        self.commiting = False
+        self.log = logging.getLogger("Db#%s:%s" % (self.id, schema["db_name"]))
         self.table_names = None
         self.collect_stats = False
         self.foreign_keys = False
+        self.need_commit = False
         self.query_stats = {}
         self.db_keyvalues = {}
         self.delayed_queue = []
         self.delayed_queue_thread = None
         self.close_idle = close_idle
         self.last_query_time = time.time()
+        self.last_sleep_time = time.time()
+        self.num_execute_since_sleep = 0
+        self.lock = ThreadPool.Lock()
+        self.connect_lock = ThreadPool.Lock()
 
     def __repr__(self):
         return "<Db#%s:%s close_idle:%s>" % (id(self), self.db_path, self.close_idle)
 
     def connect(self):
-        if self not in opened_dbs:
-            opened_dbs.append(self)
-        s = time.time()
-        if not os.path.isdir(self.db_dir):  # Directory not exist yet
-            os.makedirs(self.db_dir)
-            self.log.debug("Created Db path: %s" % self.db_dir)
-        if not os.path.isfile(self.db_path):
-            self.log.debug("Db file not exist yet: %s" % self.db_path)
-        self.conn = sqlite3.connect(self.db_path, check_same_thread=False)
-        self.conn.row_factory = sqlite3.Row
-        self.conn.isolation_level = None
-        self.cur = self.getCursor()
-        self.log.debug(
-            "Connected to %s in %.3fs (opened: %s, sqlite version: %s)..." %
-            (self.db_path, time.time() - s, len(opened_dbs), sqlite3.version)
-        )
+        self.connect_lock.acquire(True)
+        try:
+            if self.conn:
+                self.log.debug("Already connected, connection ignored")
+                return
+
+            if self not in opened_dbs:
+                opened_dbs.append(self)
+            s = time.time()
+            try:  # Directory not exist yet
+                os.makedirs(self.db_dir)
+                self.log.debug("Created Db path: %s" % self.db_dir)
+            except OSError as err:
+                if err.errno != errno.EEXIST:
+                    raise err
+            if not os.path.isfile(self.db_path):
+                self.log.debug("Db file not exist yet: %s" % self.db_path)
+            self.conn = sqlite3.connect(self.db_path, isolation_level="DEFERRED", check_same_thread=False)
+            self.conn.row_factory = sqlite3.Row
+            self.conn.set_progress_handler(self.progress, 5000000)
+            self.conn.execute('PRAGMA journal_mode=WAL')
+            if self.foreign_keys:
+                self.conn.execute("PRAGMA foreign_keys = ON")
+            self.cur = self.getCursor()
+
+            self.log.debug(
+                "Connected to %s in %.3fs (opened: %s, sqlite version: %s)..." %
+                (self.db_path, time.time() - s, len(opened_dbs), sqlite3.version)
+            )
+            self.log.debug("Connect by thread: %s" % threading.current_thread().ident)
+            self.log.debug("Connect called by %s" % Debug.formatStack())
+        finally:
+            self.connect_lock.release()
+
+    def getConn(self):
+        if not self.conn:
+            self.connect()
+        return self.conn
+
+    def progress(self, *args, **kwargs):
+        self.progress_sleeping = True
+        time.sleep(0.001)
+        self.progress_sleeping = False
 
     # Execute query using dbcursor
     def execute(self, query, params=None):
         if not self.conn:
             self.connect()
         return self.cur.execute(query, params)
+
+    @thread_pool_db.wrap
+    def commit(self, reason="Unknown"):
+        if self.progress_sleeping:
+            self.log.debug("Commit ignored: Progress sleeping")
+            return False
+
+        if not self.conn:
+            self.log.debug("Commit ignored: No connection")
+            return False
+
+        if self.commiting:
+            self.log.debug("Commit ignored: Already commiting")
+            return False
+
+        try:
+            s = time.time()
+            self.commiting = True
+            self.conn.commit()
+            self.log.debug("Commited in %.3fs (reason: %s)" % (time.time() - s, reason))
+            return True
+        except Exception as err:
+            if "SQL statements in progress" in str(err):
+                self.log.warning("Commit delayed: %s (reason: %s)" % (Debug.formatException(err), reason))
+            else:
+                self.log.error("Commit error: %s (reason: %s)" % (Debug.formatException(err), reason))
+            return False
+        finally:
+            self.commiting = False
 
     def insertOrUpdate(self, *args, **kwargs):
         if not self.conn:
@@ -98,32 +202,47 @@ class Db(object):
 
         s = time.time()
         cur = self.getCursor()
-        cur.execute("BEGIN")
         for command, params in self.delayed_queue:
             if command == "insertOrUpdate":
                 cur.insertOrUpdate(*params[0], **params[1])
             else:
                 cur.execute(*params[0], **params[1])
 
-        cur.execute("END")
         if len(self.delayed_queue) > 10:
             self.log.debug("Processed %s delayed queue in %.3fs" % (len(self.delayed_queue), time.time() - s))
         self.delayed_queue = []
         self.delayed_queue_thread = None
 
-    def close(self):
+    def close(self, reason="Unknown"):
+        if not self.conn:
+            return False
+        self.connect_lock.acquire()
         s = time.time()
         if self.delayed_queue:
             self.processDelayed()
         if self in opened_dbs:
             opened_dbs.remove(self)
+        self.need_commit = False
+        self.commit("Closing: %s" % reason)
+        self.log.debug("Close called by %s" % Debug.formatStack())
+        for i in range(5):
+            if len(self.cursors) == 0:
+                break
+            self.log.debug("Pending cursors: %s" % len(self.cursors))
+            time.sleep(0.1 * i)
+        if len(self.cursors):
+            self.log.debug("Killing cursors: %s" % len(self.cursors))
+            self.conn.interrupt()
+
         if self.cur:
             self.cur.close()
         if self.conn:
-            self.conn.close()
+            ThreadPool.main_loop.call(self.conn.close)
         self.conn = None
         self.cur = None
-        self.log.debug("%s closed in %.3fs, opened: %s" % (self.db_path, time.time() - s, len(opened_dbs)))
+        self.log.debug("%s closed (reason: %s) in %.3fs, opened: %s" % (self.db_path, reason, time.time() - s, len(opened_dbs)))
+        self.connect_lock.release()
+        return True
 
     # Gets a cursor object to database
     # Return: Cursor class
@@ -131,17 +250,13 @@ class Db(object):
         if not self.conn:
             self.connect()
 
-        cur = DbCursor(self.conn, self)
-        if config.db_mode == "security":
-            cur.execute("PRAGMA journal_mode = WAL")
-            cur.execute("PRAGMA synchronous = NORMAL")
-        else:
-            cur.execute("PRAGMA journal_mode = MEMORY")
-            cur.execute("PRAGMA synchronous = OFF")
-        if self.foreign_keys:
-            cur.execute("PRAGMA foreign_keys = ON")
-
+        cur = DbCursor(self)
         return cur
+
+    def getSharedCursor(self):
+        if not self.conn:
+            self.connect()
+        return self.cur
 
     # Get the table version
     # Return: Table version or None if not exist
@@ -149,8 +264,8 @@ class Db(object):
         if not self.db_keyvalues:  # Get db keyvalues
             try:
                 res = self.execute("SELECT * FROM keyvalue WHERE json_id=0")  # json_id = 0 is internal keyvalues
-            except sqlite3.OperationalError, err:  # Table not exist
-                self.log.debug("Query error: %s" % err)
+            except sqlite3.OperationalError as err:  # Table not exist
+                self.log.debug("Query table version error: %s" % err)
                 return False
 
             for row in res:
@@ -163,9 +278,8 @@ class Db(object):
     def checkTables(self):
         s = time.time()
         changed_tables = []
-        cur = self.getCursor()
 
-        cur.execute("BEGIN")
+        cur = self.getSharedCursor()
 
         # Check internal tables
         # Check keyvalue table
@@ -212,16 +326,18 @@ class Db(object):
         # Check schema tables
         for table_name, table_settings in self.schema.get("tables", {}).items():
             try:
+                indexes = table_settings.get("indexes", [])
+                version = table_settings.get("schema_changed", 0)
                 changed = cur.needTable(
                     table_name, table_settings["cols"],
-                    table_settings.get("indexes", []), version=table_settings.get("schema_changed", 0)
+                    indexes, version=version
                 )
                 if changed:
                     changed_tables.append(table_name)
             except Exception as err:
                 self.log.error("Error creating table %s: %s" % (table_name, Debug.formatException(err)))
+                raise DbTableError(err, table_name)
 
-        cur.execute("COMMIT")
         self.log.debug("Db check done in %.3fs, changed tables: %s" % (time.time() - s, changed_tables))
         if changed_tables:
             self.db_keyvalues = {}  # Refresh table version cache
@@ -257,24 +373,23 @@ class Db(object):
                 data = {}
             else:
                 if file_path.endswith("json.gz"):
-                    data = json.load(helper.limitedGzipFile(fileobj=file))
+                    file = helper.limitedGzipFile(fileobj=file)
+
+                if sys.version_info.major == 3 and sys.version_info.minor < 6:
+                    data = json.loads(file.read().decode("utf8"))
                 else:
                     data = json.load(file)
-        except Exception, err:
+        except Exception as err:
             self.log.debug("Json file %s load error: %s" % (file_path, err))
             data = {}
 
         # No cursor specificed
         if not cur:
-            cur = self.getCursor()
-            cur.execute("BEGIN")
+            cur = self.getSharedCursor()
             cur.logging = False
-            commit_after_done = True
-        else:
-            commit_after_done = False
 
         # Row for current json file if required
-        if not data or filter(lambda dbmap: "to_keyvalue" in dbmap or "to_table" in dbmap, matched_maps):
+        if not data or [dbmap for dbmap in matched_maps if "to_keyvalue" in dbmap or "to_table" in dbmap]:
             json_row = cur.getJsonRow(relative_path)
 
         # Check matched mappings in schema
@@ -311,7 +426,7 @@ class Db(object):
                         changed = True
                 if changed:
                     # Add the custom col values
-                    data_json_row.update({key: val for key, val in data.iteritems() if key in dbmap["to_json_table"]})
+                    data_json_row.update({key: val for key, val in data.items() if key in dbmap["to_json_table"]})
                     cur.execute("INSERT OR REPLACE INTO json ?", data_json_row)
 
             # Insert data to tables
@@ -333,7 +448,7 @@ class Db(object):
 
                 # Fill import cols from table cols
                 if not import_cols:
-                    import_cols = set(map(lambda item: item[0], self.schema["tables"][table_name]["cols"]))
+                    import_cols = set([item[0] for item in self.schema["tables"][table_name]["cols"]])
 
                 cur.execute("DELETE FROM %s WHERE json_id = ?" % table_name, (json_row["json_id"],))
 
@@ -341,7 +456,7 @@ class Db(object):
                     continue
 
                 if key_col:  # Map as dict
-                    for key, val in data[node].iteritems():
+                    for key, val in data[node].items():
                         if val_col:  # Single value
                             cur.execute(
                                 "INSERT OR REPLACE INTO %s ?" % table_name,
@@ -355,9 +470,9 @@ class Db(object):
                                 row[key_col] = key
                                 # Replace in value if necessary
                                 if replaces:
-                                    for replace_key, replace in replaces.iteritems():
+                                    for replace_key, replace in replaces.items():
                                         if replace_key in row:
-                                            for replace_from, replace_to in replace.iteritems():
+                                            for replace_from, replace_to in replace.items():
                                                 row[replace_key] = row[replace_key].replace(replace_from, replace_to)
 
                                 row["json_id"] = json_row["json_id"]
@@ -379,8 +494,6 @@ class Db(object):
             self.log.debug("Cleanup json row for %s" % file_path)
             cur.execute("DELETE FROM json WHERE json_id = %s" % json_row["json_id"])
 
-        if commit_after_done:
-            cur.execute("COMMIT")
         return True
 
 
@@ -394,7 +507,6 @@ if __name__ == "__main__":
     dbjson.collect_stats = True
     dbjson.checkTables()
     cur = dbjson.getCursor()
-    cur.execute("BEGIN")
     cur.logging = False
     dbjson.updateJson("data/users/content.json", cur=cur)
     for user_dir in os.listdir("data/users"):
@@ -402,7 +514,6 @@ if __name__ == "__main__":
             dbjson.updateJson("data/users/%s/data.json" % user_dir, cur=cur)
             # print ".",
     cur.logging = True
-    cur.execute("COMMIT")
-    print "Done in %.3fs" % (time.time() - s)
+    print("Done in %.3fs" % (time.time() - s))
     for query, stats in sorted(dbjson.query_stats.items()):
-        print "-", query, stats
+        print("-", query, stats)

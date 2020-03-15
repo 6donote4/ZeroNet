@@ -3,7 +3,7 @@ import sys
 import os
 import locale
 import re
-import ConfigParser
+import configparser
 import logging
 import logging.handlers
 import stat
@@ -16,16 +16,25 @@ class Config(object):
         self.rev = 3870
         self.argv = argv
         self.action = None
+        self.test_parser = None
         self.pending_changes = {}
         self.need_restart = False
         self.keys_api_change_allowed = set([
             "tor", "fileserver_port", "language", "tor_use_bridges", "trackers_proxy", "trackers",
-            "trackers_file", "open_browser", "log_level", "fileserver_ip_type", "ip_external"
+            "trackers_file", "open_browser", "log_level", "fileserver_ip_type", "ip_external", "offline",
+            "threads_fs_read", "threads_fs_write", "threads_crypt", "threads_db"
         ])
-        self.keys_restart_need = set(["tor", "fileserver_port", "fileserver_ip_type"])
+        self.keys_restart_need = set([
+            "tor", "fileserver_port", "fileserver_ip_type", "threads_fs_read", "threads_fs_write", "threads_crypt", "threads_db"
+        ])
         self.start_dir = self.getStartDir()
 
-        self.config_file = "zeronet.conf"
+        self.config_file = self.start_dir + "/zeronet.conf"
+        self.data_dir = self.start_dir + "/data"
+        self.log_dir = self.start_dir + "/log"
+        self.openssl_lib_file = None
+        self.openssl_bin_file = None
+
         self.trackers_file = False
         self.createParser()
         self.createArguments()
@@ -46,20 +55,22 @@ class Config(object):
     def getStartDir(self):
         this_file = os.path.abspath(__file__).replace("\\", "/").rstrip("cd")
 
-        if this_file.endswith("/Contents/Resources/core/src/Config.py"):
+        if "--start_dir" in self.argv:
+            start_dir = self.argv[self.argv.index("--start_dir") + 1]
+        elif this_file.endswith("/Contents/Resources/core/src/Config.py"):
             # Running as ZeroNet.app
             if this_file.startswith("/Application") or this_file.startswith("/private") or this_file.startswith(os.path.expanduser("~/Library")):
                 # Runnig from non-writeable directory, put data to Application Support
-                start_dir = os.path.expanduser("~/Library/Application Support/ZeroNet").decode(sys.getfilesystemencoding())
+                start_dir = os.path.expanduser("~/Library/Application Support/ZeroNet")
             else:
                 # Running from writeable directory put data next to .app
-                start_dir = re.sub("/[^/]+/Contents/Resources/core/src/Config.py", "", this_file).decode(sys.getfilesystemencoding())
+                start_dir = re.sub("/[^/]+/Contents/Resources/core/src/Config.py", "", this_file)
         elif this_file.endswith("/core/src/Config.py"):
             # Running as exe or source is at Application Support directory, put var files to outside of core dir
-            start_dir = this_file.replace("/core/src/Config.py", "").decode(sys.getfilesystemencoding())
+            start_dir = this_file.replace("/core/src/Config.py", "")
         elif this_file.endswith("usr/share/zeronet/src/Config.py"):
             # Running from non-writeable location, e.g., AppImage
-            start_dir = os.path.expanduser("~/ZeroNet").decode(sys.getfilesystemencoding())
+            start_dir = os.path.expanduser("~/ZeroNet")
         else:
             start_dir = "."
 
@@ -71,12 +82,11 @@ class Config(object):
             "zero://boot3rdez4rzn36x.onion:15441",
             "zero://zero.booth.moe#f36ca555bee6ba216b14d10f38c16f7769ff064e0e37d887603548cc2e64191d:443",  # US/NY
             "udp://tracker.coppersurfer.tk:6969",  # DE
-            "udp://tracker.port443.xyz:6969",  # UK
             "udp://104.238.198.186:8000",  # US/LA
-            "http://tracker2.itzmx.com:6961/announce",  # US/LA
+            "udp://retracker.akado-ural.ru:80",  # RU
+            "http://h4.trakx.nibba.trade:80/announce",  # US/VA
             "http://open.acgnxtracker.com:80/announce",  # DE
-            "http://open.trackerlist.xyz:80/announce",  # Cloudflare
-            "https://1.tracker.eu.org:443/announce",  # Google App Engine
+            "http://tracker.bt4g.com:2095/announce",  # Cloudflare
             "zero://2602:ffc5::c5b2:5360:26312"  # US/ATL
         ]
         # Platform specific
@@ -111,6 +121,8 @@ class Config(object):
 
         # SiteCreate
         action = self.subparsers.add_parser("siteCreate", help='Create a new site')
+        action.register('type', 'bool', self.strToBool)
+        action.add_argument('--use_master_seed', help="Allow created site's private key to be recovered using the master seed in users.json (default: True)", type="bool", choices=[True, False], default=True)
 
         # SiteNeedFile
         action = self.subparsers.add_parser("siteNeedFile", help='Get a file from site')
@@ -199,19 +211,27 @@ class Config(object):
         action = self.subparsers.add_parser("testConnection", help='Testing')
         action = self.subparsers.add_parser("testAnnounce", help='Testing')
 
+        self.test_parser = self.subparsers.add_parser("test", help='Run a test')
+        self.test_parser.add_argument('test_name', help='Test name', nargs="?")
+        # self.test_parser.add_argument('--benchmark', help='Run the tests multiple times to measure the performance', action='store_true')
+
         # Config parameters
         self.parser.add_argument('--verbose', help='More detailed logging', action='store_true')
         self.parser.add_argument('--debug', help='Debug mode', action='store_true')
-        self.parser.add_argument('--silent', help='Disable logging to terminal output', action='store_true')
+        self.parser.add_argument('--silent', help='Only log errors to terminal output', action='store_true')
         self.parser.add_argument('--debug_socket', help='Debug socket connections', action='store_true')
+        self.parser.add_argument('--merge_media', help='Merge all.js and all.css', action='store_true')
 
         self.parser.add_argument('--batch', help="Batch mode (No interactive input for commands)", action='store_true')
 
+        self.parser.add_argument('--start_dir', help='Path of working dir for variable content (data, log, .conf)', default=self.start_dir, metavar="path")
         self.parser.add_argument('--config_file', help='Path of config file', default=config_file, metavar="path")
         self.parser.add_argument('--data_dir', help='Path of data directory', default=data_dir, metavar="path")
 
+        self.parser.add_argument('--console_log_level', help='Level of logging to console', default="default", choices=["default", "DEBUG", "INFO", "ERROR", "off"])
+
         self.parser.add_argument('--log_dir', help='Path of logging directory', default=log_dir, metavar="path")
-        self.parser.add_argument('--log_level', help='Level of logging to file', default="DEBUG", choices=["DEBUG", "INFO", "ERROR"])
+        self.parser.add_argument('--log_level', help='Level of logging to file', default="DEBUG", choices=["DEBUG", "INFO", "ERROR", "off"])
         self.parser.add_argument('--log_rotate', help='Log rotate interval', default="daily", choices=["hourly", "daily", "weekly", "off"])
         self.parser.add_argument('--log_rotate_backup_count', help='Log rotate backup count', default=5, type=int)
 
@@ -226,8 +246,10 @@ class Config(object):
                                  nargs='?', const="default_browser", metavar='browser_name')
         self.parser.add_argument('--homepage', help='Web interface Homepage', default='1HeLLo4uzjaLetFx6NH3PMwFP3qbRbTf3D',
                                  metavar='address')
-        self.parser.add_argument('--updatesite', help='Source code update site', default='1UPDatEDxnvHDo7TXvq6AEBARfNkyfxsp',
+        self.parser.add_argument('--updatesite', help='Source code update site', default='1uPDaT3uSyWAPdCv1WkMb5hBQjWSNNACf',
                                  metavar='address')
+        self.parser.add_argument('--dist_type', help='Type of installed distribution', default='source')
+
         self.parser.add_argument('--size_limit', help='Default site size limit in MB', default=10, type=int, metavar='limit')
         self.parser.add_argument('--file_size_limit', help='Maximum per file size limit in MB', default=10, type=int, metavar='limit')
         self.parser.add_argument('--connected_limit', help='Max connected peer per site', default=8, type=int, metavar='connected_limit')
@@ -240,15 +262,18 @@ class Config(object):
         self.parser.add_argument('--fileserver_ip_type', help='FileServer ip type', default="dual", choices=["ipv4", "ipv6", "dual"])
         self.parser.add_argument('--ip_local', help='My local ips', default=ip_local, type=int, metavar='ip', nargs='*')
         self.parser.add_argument('--ip_external', help='Set reported external ip (tested on start if None)', metavar='ip', nargs='*')
+        self.parser.add_argument('--offline', help='Disable network communication', action='store_true')
 
         self.parser.add_argument('--disable_udp', help='Disable UDP connections', action='store_true')
         self.parser.add_argument('--proxy', help='Socks proxy address', metavar='ip:port')
         self.parser.add_argument('--bind', help='Bind outgoing sockets to this address', metavar='ip')
         self.parser.add_argument('--trackers', help='Bootstraping torrent trackers', default=trackers, metavar='protocol://address', nargs='*')
-        self.parser.add_argument('--trackers_file', help='Load torrent trackers dynamically from a file', default=False, metavar='path')
+        self.parser.add_argument('--trackers_file', help='Load torrent trackers dynamically from a file', metavar='path', nargs='*')
         self.parser.add_argument('--trackers_proxy', help='Force use proxy to connect to trackers (disable, tor, ip:port)', default="disable")
-        self.parser.add_argument('--use_openssl', help='Use OpenSSL liblary for speedup',
-                                 type='bool', choices=[True, False], default=use_openssl)
+        self.parser.add_argument('--use_libsecp256k1', help='Use Libsecp256k1 liblary for speedup', type='bool', choices=[True, False], default=True)
+        self.parser.add_argument('--use_openssl', help='Use OpenSSL liblary for speedup', type='bool', choices=[True, False], default=True)
+        self.parser.add_argument('--openssl_lib_file', help='Path for OpenSSL library file (default: detect)', default=argparse.SUPPRESS, metavar="path")
+        self.parser.add_argument('--openssl_bin_file', help='Path for OpenSSL binary file (default: detect)', default=argparse.SUPPRESS, metavar="path")
         self.parser.add_argument('--disable_db', help='Disable database updating', action='store_true')
         self.parser.add_argument('--disable_encryption', help='Disable connection encryption', action='store_true')
         self.parser.add_argument('--force_encryption', help="Enforce encryption to all peer connections", action='store_true')
@@ -267,6 +292,12 @@ class Config(object):
         self.parser.add_argument("--fix_float_decimals", help='Fix content.json modification date float precision on verification',
                                  type='bool', choices=[True, False], default=fix_float_decimals)
         self.parser.add_argument("--db_mode", choices=["speed", "security"], default="speed")
+
+        self.parser.add_argument('--threads_fs_read', help='Number of threads for file read operations', default=1, type=int)
+        self.parser.add_argument('--threads_fs_write', help='Number of threads for file write operations', default=1, type=int)
+        self.parser.add_argument('--threads_crypt', help='Number of threads for cryptographic operations', default=2, type=int)
+        self.parser.add_argument('--threads_db', help='Number of threads for database operations', default=1, type=int)
+
         self.parser.add_argument("--download_optional", choices=["manual", "auto"], default="manual")
 
         self.parser.add_argument('--coffeescript_compiler', help='Coffeescript compiler for developing', default=coffeescript,
@@ -291,20 +322,21 @@ class Config(object):
 
         self.trackers = self.arguments.trackers[:]
 
-        try:
-            if self.trackers_file.startswith("/"):  # Absolute
-                trackers_file_path = self.trackers_file
-            elif self.trackers_file.startswith("{data_dir}"):  # Relative to data_dir
-                trackers_file_path = self.trackers_file.replace("{data_dir}", self.data_dir)
-            else:  # Relative to zeronet.py
-                trackers_file_path = self.start_dir + "/" + self.trackers_file
+        for trackers_file in self.trackers_file:
+            try:
+                if trackers_file.startswith("/"):  # Absolute
+                    trackers_file_path = trackers_file
+                elif trackers_file.startswith("{data_dir}"):  # Relative to data_dir
+                    trackers_file_path = trackers_file.replace("{data_dir}", self.data_dir)
+                else:  # Relative to zeronet.py
+                    trackers_file_path = self.start_dir + "/" + trackers_file
 
-            for line in open(trackers_file_path):
-                tracker = line.strip()
-                if "://" in tracker and tracker not in self.trackers:
-                    self.trackers.append(tracker)
-        except Exception as err:
-            print "Error loading trackers file: %s" % err
+                for line in open(trackers_file_path):
+                    tracker = line.strip()
+                    if "://" in tracker and tracker not in self.trackers:
+                        self.trackers.append(tracker)
+            except Exception as err:
+                print("Error loading trackers file: %s" % err)
 
     # Find arguments specified for current action
     def getActionArguments(self):
@@ -316,7 +348,7 @@ class Config(object):
 
     # Try to find action from argv
     def getAction(self, argv):
-        actions = [action.choices.keys() for action in self.parser._actions if action.dest == "action"][0]  # Valid actions
+        actions = [list(action.choices.keys()) for action in self.parser._actions if action.dest == "action"][0]  # Valid actions
         found_action = False
         for action in actions:  # See if any in argv
             if action in argv:
@@ -345,8 +377,17 @@ class Config(object):
                 valid_parameters.append(arg)
         return valid_parameters + plugin_parameters
 
+    def getParser(self, argv):
+        action = self.getAction(argv)
+        if not action:
+            return self.parser
+        else:
+            return self.subparsers.choices[action]
+
     # Parse arguments from config file and command line
     def parse(self, silent=False, parse_config=True):
+        argv = self.argv[:]  # Copy command line arguments
+        current_parser = self.getParser(argv)
         if silent:  # Don't display messages or quit on unknown parameter
             original_print_message = self.parser._print_message
             original_exit = self.parser.exit
@@ -354,11 +395,10 @@ class Config(object):
             def silencer(parser, function_name):
                 parser.exited = True
                 return None
-            self.parser.exited = False
-            self.parser._print_message = lambda *args, **kwargs: silencer(self.parser, "_print_message")
-            self.parser.exit = lambda *args, **kwargs: silencer(self.parser, "exit")
+            current_parser.exited = False
+            current_parser._print_message = lambda *args, **kwargs: silencer(current_parser, "_print_message")
+            current_parser.exit = lambda *args, **kwargs: silencer(current_parser, "exit")
 
-        argv = self.argv[:]  # Copy command line arguments
         self.parseCommandline(argv, silent)  # Parse argv
         self.setAttributes()
         if parse_config:
@@ -372,10 +412,10 @@ class Config(object):
                 self.ip_local.append(self.fileserver_ip)
 
         if silent:  # Restore original functions
-            if self.parser.exited and self.action == "main":  # Argument parsing halted, don't start ZeroNet with main action
+            if current_parser.exited and self.action == "main":  # Argument parsing halted, don't start ZeroNet with main action
                 self.action = None
-            self.parser._print_message = original_print_message
-            self.parser.exit = original_exit
+            current_parser._print_message = original_print_message
+            current_parser.exit = original_exit
 
         self.loadTrackersFile()
 
@@ -404,7 +444,7 @@ class Config(object):
             self.config_file = argv[argv.index("--config_file") + 1]
         # Load config file
         if os.path.isfile(self.config_file):
-            config = ConfigParser.ConfigParser(allow_no_value=True)
+            config = configparser.RawConfigParser(allow_no_value=True, strict=False)
             config.read(self.config_file)
             for section in config.sections():
                 for key, val in config.items(section):
@@ -414,7 +454,7 @@ class Config(object):
                         key = section + "_" + key
 
                     if key == "open_browser":  # Prefer config file value over cli argument
-                        if "--%s" % key in argv:
+                        while "--%s" % key in argv:
                             pos = argv.index("--open_browser")
                             del argv[pos:pos + 2]
 
@@ -428,6 +468,16 @@ class Config(object):
                     argv = argv[:1] + argv_extend + argv[1:]
         return argv
 
+    # Return command line value of given argument
+    def getCmdlineValue(self, key):
+        if key not in self.argv:
+            return None
+        argv_index = self.argv.index(key)
+        if argv_index == len(self.argv) - 1:  # last arg, test not specified
+            return None
+
+        return self.argv[argv_index + 1]
+
     # Expose arguments as class attributes
     def setAttributes(self):
         # Set attributes from arguments
@@ -436,8 +486,9 @@ class Config(object):
             for key, val in args.items():
                 if type(val) is list:
                     val = val[:]
-                if key in ("data_dir", "log_dir"):
-                    val = val.replace("\\", "/")
+                if key in ("data_dir", "log_dir", "start_dir", "openssl_bin_file", "openssl_lib_file"):
+                    if val:
+                        val = val.replace("\\", "/")
                 setattr(self, key, val)
 
     def loadPlugins(self):
@@ -446,7 +497,11 @@ class Config(object):
         @PluginManager.acceptPlugins
         class ConfigPlugin(object):
             def __init__(self, config):
+                self.argv = config.argv
                 self.parser = config.parser
+                self.subparsers = config.subparsers
+                self.test_parser = config.test_parser
+                self.getCmdlineValue = config.getCmdlineValue
                 self.createArguments()
 
             def createArguments(self):
@@ -467,7 +522,7 @@ class Config(object):
         for line in lines:
             if line.strip() == "[global]":
                 global_line_i = i
-            if line.startswith(key + " ="):
+            if line.startswith(key + " =") or line == key:
                 key_line_i = i
             i += 1
 
@@ -500,6 +555,7 @@ class Config(object):
 
     def getServerInfo(self):
         from Plugin import PluginManager
+        import main
 
         info = {
             "platform": sys.platform,
@@ -519,10 +575,10 @@ class Config(object):
         }
 
         try:
-            info["ip_external"] = sys.modules["main"].file_server.port_opened
-            info["tor_enabled"] = sys.modules["main"].file_server.tor_manager.enabled
-            info["tor_status"] = sys.modules["main"].file_server.tor_manager.status
-        except:
+            info["ip_external"] = main.file_server.port_opened
+            info["tor_enabled"] = main.file_server.tor_manager.enabled
+            info["tor_status"] = main.file_server.tor_manager.status
+        except Exception:
             pass
 
         return info
@@ -533,12 +589,15 @@ class Config(object):
         else:
             format = '%(name)s %(message)s'
 
-        if self.silent:
-            level = logging.ERROR
-        elif self.debug:
-            level = logging.DEBUG
+        if self.console_log_level == "default":
+            if self.silent:
+                level = logging.ERROR
+            elif self.debug:
+                level = logging.DEBUG
+            else:
+                level = logging.INFO
         else:
-            level = logging.INFO
+            level = logging.getLevelName(self.console_log_level)
 
         console_logger = logging.StreamHandler()
         console_logger.setFormatter(logging.Formatter(format, "%H:%M:%S"))
@@ -550,27 +609,37 @@ class Config(object):
             log_file_path = "%s/debug.log" % self.log_dir
         else:
             log_file_path = "%s/cmd.log" % self.log_dir
+
         if self.log_rotate == "off":
-            file_logger = logging.FileHandler(log_file_path)
+            file_logger = logging.FileHandler(log_file_path, "w", "utf-8")
         else:
             when_names = {"weekly": "w", "daily": "d", "hourly": "h"}
             file_logger = logging.handlers.TimedRotatingFileHandler(
-                log_file_path, when=when_names[self.log_rotate], interval=1, backupCount=self.log_rotate_backup_count
+                log_file_path, when=when_names[self.log_rotate], interval=1, backupCount=self.log_rotate_backup_count,
+                encoding="utf8"
             )
-            file_logger.doRollover()  # Always start with empty log file
+
+            if os.path.isfile(log_file_path):
+                file_logger.doRollover()  # Always start with empty log file
         file_logger.setFormatter(logging.Formatter('[%(asctime)s] %(levelname)-8s %(name)s %(message)s'))
         file_logger.setLevel(logging.getLevelName(self.log_level))
         logging.getLogger('').setLevel(logging.getLevelName(self.log_level))
         logging.getLogger('').addHandler(file_logger)
 
-    def initLogging(self):
+    def initLogging(self, console_logging=None, file_logging=None):
+        if console_logging == None:
+            console_logging = self.console_log_level != "off"
+
+        if file_logging == None:
+            file_logging = self.log_level != "off"
+
         # Create necessary files and dirs
         if not os.path.isdir(self.log_dir):
             os.mkdir(self.log_dir)
             try:
                 os.chmod(self.log_dir, stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
             except Exception as err:
-                print "Can't change permission of %s: %s" % (self.log_dir, err)
+                print("Can't change permission of %s: %s" % (self.log_dir, err))
 
         # Make warning hidden from console
         logging.WARNING = 15  # Don't display warnings if not in debug mode
@@ -578,7 +647,9 @@ class Config(object):
 
         logging.getLogger('').name = "-"  # Remove root prefix
 
-        self.initConsoleLogger()
-        self.initFileLogger()
+        if console_logging:
+            self.initConsoleLogger()
+        if file_logging:
+            self.initFileLogger()
 
 config = Config(sys.argv)

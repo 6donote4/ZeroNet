@@ -14,12 +14,8 @@ import gevent
 from Config import config
 from Crypt import CryptRsa
 from Site import SiteManager
-from lib.PySocks import socks
-try:
-    from gevent.coros import RLock
-except:
-    from gevent.lock import RLock
-from util import helper
+import socks
+from gevent.lock import RLock
 from Debug import Debug
 from Plugin import PluginManager
 
@@ -37,6 +33,8 @@ class TorManager(object):
         self.conn = None
         self.lock = RLock()
         self.starting = True
+        self.connecting = True
+        self.status = None
         self.event_started = gevent.event.AsyncResult()
 
         if config.tor == "disable":
@@ -63,35 +61,33 @@ class TorManager(object):
         self.starting = True
         try:
             if not self.connect():
-                raise Exception("No connection")
+                raise Exception(self.status)
             self.log.debug("Tor proxy port %s check ok" % config.tor_proxy)
-        except Exception, err:
-            if sys.platform.startswith("win"):
-                self.log.info(u"Starting self-bundled Tor, due to Tor proxy port %s check error: %s" % (config.tor_proxy, err))
+        except Exception as err:
+            if sys.platform.startswith("win") and os.path.isfile(self.tor_exe):
+                self.log.info("Starting self-bundled Tor, due to Tor proxy port %s check error: %s" % (config.tor_proxy, err))
+                # Change to self-bundled Tor ports
+                self.port = 49051
+                self.proxy_port = 49050
+                if config.tor == "always":
+                    socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", self.proxy_port)
+                self.enabled = True
+                if not self.connect():
+                    self.startTor()
             else:
-                self.log.info(u"Disabling Tor, because error while accessing Tor proxy at port %s: %s" % (config.tor_proxy, err))
-            self.enabled = False
-            # Change to self-bundled Tor ports
-            from lib.PySocks import socks
-            self.port = 49051
-            self.proxy_port = 49050
-            socks.setdefaultproxy(socks.PROXY_TYPE_SOCKS5, "127.0.0.1", self.proxy_port)
-            if os.path.isfile(self.tor_exe):  # Already, downloaded: sync mode
-                self.startTor()
-            else:  # Not downloaded yet: Async mode
-                gevent.spawn(self.startTor)
+                self.log.info("Disabling Tor, because error while accessing Tor proxy at port %s: %s" % (config.tor_proxy, err))
+                self.enabled = False
 
     def setStatus(self, status):
         self.status = status
-        if "ui_server" in dir(sys.modules.get("main", {})):
-            sys.modules["main"].ui_server.updateWebsocket()
+        if "main" in sys.modules: # import main has side-effects, breaks tests
+            import main
+            if "ui_server" in dir(main):
+                main.ui_server.updateWebsocket()
 
     def startTor(self):
         if sys.platform.startswith("win"):
             try:
-                if not os.path.isfile(self.tor_exe):
-                    self.downloadTor()
-
                 self.log.info("Starting Tor client %s..." % self.tor_exe)
                 tor_dir = os.path.dirname(self.tor_exe)
                 startupinfo = subprocess.STARTUPINFO()
@@ -101,7 +97,7 @@ class TorManager(object):
                     cmd += " --UseBridges 1"
 
                 self.tor_process = subprocess.Popen(cmd, cwd=tor_dir, close_fds=True, startupinfo=startupinfo)
-                for wait in range(1, 10):  # Wait for startup
+                for wait in range(1, 3):  # Wait for startup
                     time.sleep(wait * 0.5)
                     self.enabled = True
                     if self.connect():
@@ -110,8 +106,8 @@ class TorManager(object):
                         break
                 # Terminate on exit
                 atexit.register(self.stopTor)
-            except Exception, err:
-                self.log.error(u"Error starting Tor client: %s" % Debug.formatException(str(err).decode("utf8", "ignore")))
+            except Exception as err:
+                self.log.error("Error starting Tor client: %s" % Debug.formatException(str(err)))
                 self.enabled = False
         self.starting = False
         self.event_started.set(False)
@@ -125,50 +121,8 @@ class TorManager(object):
         try:
             if self.isSubprocessRunning():
                 self.request("SIGNAL SHUTDOWN")
-        except Exception, err:
+        except Exception as err:
             self.log.error("Error stopping Tor: %s" % err)
-
-    def downloadTor(self):
-        self.log.info("Downloading Tor...")
-        # Check Tor webpage for link
-        download_page = helper.httpRequest("https://www.torproject.org/download/download.html").read()
-        download_url = re.search('href="(.*?tor.*?win32.*?zip)"', download_page).group(1)
-        if not download_url.startswith("http"):
-            download_url = "https://www.torproject.org/download/" + download_url
-
-        # Download Tor client
-        self.log.info("Downloading %s" % download_url)
-        data = helper.httpRequest(download_url, as_file=True)
-        data_size = data.tell()
-
-        # Handle redirect
-        if data_size < 1024 and "The document has moved" in data.getvalue():
-            download_url = re.search('href="(.*?tor.*?win32.*?zip)"', data.getvalue()).group(1)
-            data = helper.httpRequest(download_url, as_file=True)
-            data_size = data.tell()
-
-        if data_size > 1024:
-            import zipfile
-            zip = zipfile.ZipFile(data)
-            self.log.info("Unpacking Tor")
-            for inner_path in zip.namelist():
-                if ".." in inner_path:
-                    continue
-                dest_path = inner_path
-                dest_path = re.sub("^Data/Tor/", "tools/tor/data/", dest_path)
-                dest_path = re.sub("^Data/", "tools/tor/data/", dest_path)
-                dest_path = re.sub("^Tor/", "tools/tor/", dest_path)
-                dest_dir = os.path.dirname(dest_path)
-                if dest_dir and not os.path.isdir(dest_dir):
-                    os.makedirs(dest_dir)
-
-                if dest_dir != dest_path.strip("/"):
-                    data = zip.read(inner_path)
-                    if not os.path.isfile(dest_path):
-                        open(dest_path, 'wb').write(data)
-        else:
-            self.log.error("Bad response from server: %s" % data.getvalue())
-            return False
 
     def connect(self):
         if not self.enabled:
@@ -184,7 +138,8 @@ class TorManager(object):
         else:
             conn = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-        self.log.info("Connecting to Tor Controller %s:%s" % (self.ip, self.port))
+        self.log.debug("Connecting to Tor Controller %s:%s" % (self.ip, self.port))
+        self.connecting = True
         try:
             with self.lock:
                 conn.connect((self.ip, self.port))
@@ -196,33 +151,39 @@ class TorManager(object):
                 if config.tor_password:
                     res_auth = self.send('AUTHENTICATE "%s"' % config.tor_password, conn)
                 elif cookie_match:
-                    cookie_file = cookie_match.group(1).decode("string-escape")
+                    cookie_file = cookie_match.group(1).encode("ascii").decode("unicode_escape")
+                    if not os.path.isfile(cookie_file) and self.tor_process:
+                        # Workaround for tor client cookie auth file utf8 encoding bug (https://github.com/torproject/stem/issues/57)
+                        cookie_file = os.path.dirname(self.tor_exe) + "\\data\\control_auth_cookie"
                     auth_hex = binascii.b2a_hex(open(cookie_file, "rb").read())
-                    res_auth = self.send("AUTHENTICATE %s" % auth_hex, conn)
+                    res_auth = self.send("AUTHENTICATE %s" % auth_hex.decode("utf8"), conn)
                 else:
                     res_auth = self.send("AUTHENTICATE", conn)
 
-                assert "250 OK" in res_auth, "Authenticate error %s" % res_auth
+                if "250 OK" not in res_auth:
+                    raise Exception("Authenticate error %s" % res_auth)
 
                 # Version 0.2.7.5 required because ADD_ONION support
                 res_version = self.send("GETINFO version", conn)
-                version = re.search('version=([0-9\.]+)', res_version).group(1)
-                assert float(version.replace(".", "0", 2)) >= 207.5, "Tor version >=0.2.7.5 required, found: %s" % version
+                version = re.search(r'version=([0-9\.]+)', res_version).group(1)
+                if float(version.replace(".", "0", 2)) < 207.5:
+                    raise Exception("Tor version >=0.2.7.5 required, found: %s" % version)
 
-                self.setStatus(u"Connected (%s)" % res_auth)
+                self.setStatus("Connected (%s)" % res_auth)
                 self.event_started.set(True)
                 self.starting = False
                 self.connecting = False
                 self.conn = conn
-        except Exception, err:
+        except Exception as err:
             self.conn = None
-            self.setStatus(u"Error (%s)" % str(err).decode("utf8", "ignore"))
-            self.log.error(u"Tor controller connect error: %s" % Debug.formatException(str(err).decode("utf8", "ignore")))
+            self.setStatus("Error (%s)" % str(err))
+            self.log.warning("Tor controller connect error: %s" % Debug.formatException(str(err)))
             self.enabled = False
         return self.conn
 
     def disconnect(self):
-        self.conn.close()
+        if self.conn:
+            self.conn.close()
         self.conn = None
 
     def startOnions(self):
@@ -235,18 +196,18 @@ class TorManager(object):
     def resetCircuits(self):
         res = self.request("SIGNAL NEWNYM")
         if "250 OK" not in res:
-            self.setStatus(u"Reset circuits error (%s)" % res)
+            self.setStatus("Reset circuits error (%s)" % res)
             self.log.error("Tor reset circuits error: %s" % res)
 
     def addOnion(self):
         if len(self.privatekeys) >= config.tor_hs_limit:
-            return random.choice([key for key in self.privatekeys.keys() if key != self.site_onions.get("global")])
+            return random.choice([key for key in list(self.privatekeys.keys()) if key != self.site_onions.get("global")])
 
         result = self.makeOnionAndKey()
         if result:
             onion_address, onion_privatekey = result
             self.privatekeys[onion_address] = onion_privatekey
-            self.setStatus(u"OK (%s onions running)" % len(self.privatekeys))
+            self.setStatus("OK (%s onions running)" % len(self.privatekeys))
             SiteManager.peer_blacklist.append((onion_address + ".onion", self.fileserver_port))
             return onion_address
         else:
@@ -259,7 +220,7 @@ class TorManager(object):
             onion_address, onion_privatekey = match.groups()
             return (onion_address, onion_privatekey)
         else:
-            self.setStatus(u"AddOnion error (%s)" % res)
+            self.setStatus("AddOnion error (%s)" % res)
             self.log.error("Tor addOnion error: %s" % res)
             return False
 
@@ -270,7 +231,7 @@ class TorManager(object):
             self.setStatus("OK (%s onion running)" % len(self.privatekeys))
             return True
         else:
-            self.setStatus(u"DelOnion error (%s)" % res)
+            self.setStatus("DelOnion error (%s)" % res)
             self.log.error("Tor delOnion error: %s" % res)
             self.disconnect()
             return False
@@ -291,15 +252,16 @@ class TorManager(object):
         back = ""
         for retry in range(2):
             try:
-                conn.sendall("%s\r\n" % cmd)
+                conn.sendall(b"%s\r\n" % cmd.encode("utf8"))
                 while not back.endswith("250 OK\r\n"):
-                    back += conn.recv(1024 * 64).decode("utf8", "ignore")
+                    back += conn.recv(1024 * 64).decode("utf8")
                 break
-            except Exception, err:
+            except Exception as err:
                 self.log.error("Tor send error: %s, reconnecting..." % err)
-                self.disconnect()
-                time.sleep(1)
-                self.connect()
+                if not self.connecting:
+                    self.disconnect()
+                    time.sleep(1)
+                    self.connect()
                 back = None
         if back:
             self.log.debug("< %s" % back.strip())

@@ -4,7 +4,7 @@ class Sidebar extends Class
 		@container = null
 		@opened = false
 		@width = 410
-		@internals = new Internals(@)
+		@console = new Console(@)
 		@fixbutton = $(".fixbutton")
 		@fixbutton_addx = 0
 		@fixbutton_addy = 0
@@ -23,9 +23,9 @@ class Sidebar extends Class
 		@original_set_site_info = @wrapper.setSiteInfo  # We going to override this, save the original
 
 		# Start in opened state for debugging
-		if false
+		if window.top.location.hash == "#ZeroNet:OpenSidebar"
 			@startDrag()
-			@moved()
+			@moved("x")
 			@fixbutton_targetx = @fixbutton_initx - @width
 			@stopDrag()
 
@@ -40,11 +40,15 @@ class Sidebar extends Class
 
 			# Disable previous listeners
 			@fixbutton.off "click touchend touchcancel"
-			@fixbutton.off "mousemove touchmove"
 
 			# Make sure its not a click
 			@dragStarted = (+ new Date)
-			@fixbutton.one "mousemove touchmove", (e) =>
+
+			# Fullscreen drag bg to capture mouse events over iframe
+			$(".drag-bg").remove()
+			$("<div class='drag-bg'></div>").appendTo(document.body)
+
+			$("body").one "mousemove touchmove", (e) =>
 				mousex = e.pageX
 				mousey = e.pageY
 				if not mousex
@@ -74,14 +78,12 @@ class Sidebar extends Class
 
 	# Start dragging the fixbutton
 	startDrag: ->
-		@move_lock = "x"  # Temporary until internals not finished
-		@log "startDrag"
+		#@move_lock = "x"  # Temporary until internals not finished
+		@log "startDrag", @fixbutton_initx, @fixbutton_inity
 		@fixbutton_targetx = @fixbutton_initx  # Fallback x position
+		@fixbutton_targety = @fixbutton_inity  # Fallback y position
 
 		@fixbutton.addClass("dragging")
-
-		# Fullscreen drag bg to capture mouse events over iframe
-		$("<div class='drag-bg'></div>").appendTo(document.body)
 
 		# IE position wrap fix
 		if navigator.userAgent.indexOf('MSIE') != -1 or navigator.appVersion.indexOf('Trident/') > 0
@@ -131,8 +133,8 @@ class Sidebar extends Class
 		@log "Moved", direction
 		@move_lock = direction
 		if direction == "y"
-			$(document.body).addClass("body-internals")
-			return @internals.createHtmltag()
+			$(document.body).addClass("body-console")
+			return @console.createHtmltag()
 		@createHtmltag()
 		$(document.body).addClass("body-sidebar")
 		@container.on "mousedown touchend touchcancel", (e) =>
@@ -202,15 +204,15 @@ class Sidebar extends Class
 						return true
 				}
 
-		# Save and forgot privatekey for site signing
+		# Save and forget privatekey for site signing
 		@tag.find("#privatekey-add").off("click, touchend").on "click touchend", (e) =>
 			@wrapper.displayPrompt "Enter your private key:", "password", "Save", "", (privatekey) =>
 				@wrapper.ws.cmd "userSetSitePrivatekey", [privatekey], (res) =>
 					@wrapper.notifications.add "privatekey", "done", "Private key saved for site signing", 5000
 			return false
 
-		@tag.find("#privatekey-forgot").off("click, touchend").on "click touchend", (e) =>
-			@wrapper.displayConfirm "Remove saved private key for this site?", "Forgot", (res) =>
+		@tag.find("#privatekey-forget").off("click, touchend").on "click touchend", (e) =>
+			@wrapper.displayConfirm "Remove saved private key for this site?", "Forget", (res) =>
 				if not res
 					return false
 				@wrapper.ws.cmd "userSetSitePrivatekey", [""], (res) =>
@@ -245,8 +247,8 @@ class Sidebar extends Class
 
 		if not @move_lock or @move_lock == "y"
 			@fixbutton[0].style.top = (mousey + @fixbutton_addy) + "px"
-			if @internals.tag
-				@internals.tag[0].style.transform = "translateY(#{0 - targety}px)"
+			if @console.tag
+				@console.tag[0].style.transform = "translateY(#{0 - targety}px)"
 
 		#if @move_lock == "x"
 			# @fixbutton[0].style.left = "#{@fixbutton_targetx} px"
@@ -260,7 +262,7 @@ class Sidebar extends Class
 		else
 			@fixbutton_targetx = @fixbutton_initx
 
-		if (not @internals.opened and 0 - targety > @page_height/10) or (@internals.opened and 0 - targety > @page_height*0.95)
+		if (not @console.opened and 0 - targety > @page_height/10) or (@console.opened and 0 - targety > @page_height*0.8)
 			@fixbutton_targety = @page_height - @fixbutton_inity - 50
 		else
 			@fixbutton_targety = @fixbutton_inity
@@ -277,7 +279,7 @@ class Sidebar extends Class
 		@fixbutton.removeClass("dragging")
 
 		# Move back to initial position
-		if @fixbutton_targetx != @fixbutton.offset().left
+		if @fixbutton_targetx != @fixbutton.offset().left or @fixbutton_targety != @fixbutton.offset().top
 			# Animate fixbutton
 			if @move_lock == "y"
 				top = @fixbutton_targety
@@ -295,7 +297,7 @@ class Sidebar extends Class
 				$(".fixbutton-bg").trigger "mouseout"  # Switch fixbutton back to normal status
 
 			@stopDragX()
-			@internals.stopDragY()
+			@console.stopDragY()
 		@move_lock = null
 
 	stopDragX: ->
@@ -331,6 +333,18 @@ class Sidebar extends Class
 		if not @opened
 			@onClosed()
 
+	sign: (inner_path, privatekey) ->
+		@wrapper.displayProgress("sign", "Signing: #{inner_path}...", 0)
+		@wrapper.ws.cmd "siteSign", {privatekey: privatekey, inner_path: inner_path, update_changed_files: true}, (res) =>
+			if res == "ok"
+				@wrapper.displayProgress("sign", "#{inner_path} signed!", 100)
+			else
+				@wrapper.displayProgress("sign", "Error signing #{inner_path}", -1)
+
+	publish: (inner_path, privatekey) ->
+		@wrapper.ws.cmd "sitePublish", {privatekey: privatekey, inner_path: inner_path, sign: true, update_changed_files: true}, (res) =>
+			if res == "ok"
+				@wrapper.notifications.add "sign", "done", "#{inner_path} Signed and published!", 5000
 
 	onOpened: ->
 		@log "Opened"
@@ -356,6 +370,14 @@ class Sidebar extends Class
 				if res == "ok"
 					@wrapper.notifications.add "done-bigfilelimit", "done", "Site bigfile auto download limit modified!", 5000
 				@updateHtmlTag()
+			return false
+
+		# Site start download optional files
+		@tag.find("#button-autodownload_previous").off("click touchend").on "click touchend", =>
+			@wrapper.ws.cmd "siteUpdate", {"address": @wrapper.site_info.address, "check_files": true}, =>
+				@wrapper.notifications.add "done-download_optional", "done", "Optional files downloaded", 5000
+
+			@wrapper.notifications.add "start-download_optional", "info", "Optional files download started", 5000
 			return false
 
 		# Database reload
@@ -473,23 +495,17 @@ class Sidebar extends Class
 		menu.addItem "Sign", =>
 			inner_path = @tag.find("#input-contents").val()
 
-			@wrapper.ws.cmd "fileRules", {inner_path: inner_path}, (res) =>
-				if @wrapper.site_info.privatekey
-					# Privatekey stored in users.json
-					@wrapper.ws.cmd "siteSign", {privatekey: "stored", inner_path: inner_path, update_changed_files: true}, (res) =>
-						if res == "ok"
-							@wrapper.notifications.add "sign", "done", "#{inner_path} Signed!", 5000
-				else if @wrapper.site_info.auth_address in res.signers
+			@wrapper.ws.cmd "fileRules", {inner_path: inner_path}, (rules) =>
+				if @wrapper.site_info.auth_address in rules.signers
 					# ZeroID or other ID provider
-					@wrapper.ws.cmd "siteSign", {privatekey: null, inner_path: inner_path, update_changed_files: true}, (res) =>
-						if res == "ok"
-							@wrapper.notifications.add "sign", "done", "#{inner_path} Signed!", 5000
+					@sign(inner_path)
+				else if @wrapper.site_info.privatekey
+					# Privatekey stored in users.json
+					@sign(inner_path, "stored")
 				else
 					# Ask the user for privatekey
 					@wrapper.displayPrompt "Enter your private key:", "password", "Sign", "", (privatekey) => # Prompt the private key
-						@wrapper.ws.cmd "siteSign", {privatekey: privatekey, inner_path: inner_path, update_changed_files: true}, (res) =>
-							if res == "ok"
-								@wrapper.notifications.add "sign", "done", "#{inner_path} Signed!", 5000
+						@sign(inner_path, privatekey)
 
 			@tag.find(".contents + .flex").removeClass "active"
 			menu.hide()
@@ -518,24 +534,17 @@ class Sidebar extends Class
 		@tag.find("#button-sign-publish").off("click touchend").on "click touchend", =>
 			inner_path = @tag.find("#input-contents").val()
 
-			@wrapper.ws.cmd "fileRules", {inner_path: inner_path}, (res) =>
-				if @wrapper.site_info.privatekey
-					# Privatekey stored in users.json
-					@wrapper.ws.cmd "sitePublish", {privatekey: "stored", inner_path: inner_path, sign: true, update_changed_files: true}, (res) =>
-						if res == "ok"
-							@wrapper.notifications.add "sign", "done", "#{inner_path} Signed and published!", 5000
-				else if @wrapper.site_info.auth_address in res.signers
+			@wrapper.ws.cmd "fileRules", {inner_path: inner_path}, (rules) =>
+				if @wrapper.site_info.auth_address in rules.signers
 					# ZeroID or other ID provider
-					@wrapper.ws.cmd "sitePublish", {privatekey: null, inner_path: inner_path, sign: true, update_changed_files: true}, (res) =>
-						if res == "ok"
-							@wrapper.notifications.add "sign", "done", "#{inner_path} Signed and published!", 5000
+					@publish(inner_path, null)
+				else if @wrapper.site_info.privatekey
+					# Privatekey stored in users.json
+					@publish(inner_path, "stored")
 				else
 					# Ask the user for privatekey
 					@wrapper.displayPrompt "Enter your private key:", "password", "Sign", "", (privatekey) => # Prompt the private key
-						@wrapper.ws.cmd "sitePublish", {privatekey: privatekey, inner_path: inner_path, sign: true, update_changed_files: true}, (res) =>
-							if res == "ok"
-								@wrapper.notifications.add "sign", "done", "#{inner_path} Signed and published!", 5000
-
+						@publish(inner_path, privatekey)
 			return false
 
 		# Close
@@ -555,7 +564,7 @@ class Sidebar extends Class
 		$(window).off "resize"
 		$(window).on "resize", @resized
 		$(document.body).css("transition", "0.6s ease-in-out").removeClass("body-sidebar").on transitionEnd, (e) =>
-			if e.target == document.body and not $(document.body).hasClass("body-sidebar") and not $(document.body).hasClass("body-internals")
+			if e.target == document.body and not $(document.body).hasClass("body-sidebar") and not $(document.body).hasClass("body-console")
 				$(document.body).css("height", "auto").css("perspective", "").css("will-change", "").css("transition", "").off transitionEnd
 				@unloadGlobe()
 
@@ -564,7 +573,6 @@ class Sidebar extends Class
 
 
 	loadGlobe: =>
-		console.log "loadGlobe", @tag.find(".globe")[0], @tag.find(".globe").hasClass("loading")
 		if @tag.find(".globe").hasClass("loading")
 			setTimeout (=>
 				if typeof(DAT) == "undefined"  # Globe script not loaded, do it first

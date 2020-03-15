@@ -5,18 +5,26 @@ import json
 from Config import config
 from Plugin import PluginManager
 from Crypt import CryptBitcoin
-import UserPlugin
+from . import UserPlugin
+from util.Flag import flag
+from Translate import translate as _
+
+# We can only import plugin host clases after the plugins are loaded
+@PluginManager.afterLoad
+def importPluginnedClasses():
+    global UserManager
+    from User import UserManager
 
 try:
     local_master_addresses = set(json.load(open("%s/users.json" % config.data_dir)).keys())  # Users in users.json
-except Exception, err:
+except Exception as err:
     local_master_addresses = set()
 
 
 @PluginManager.registerTo("UiRequest")
 class UiRequestPlugin(object):
     def __init__(self, *args, **kwargs):
-        self.user_manager = sys.modules["User.UserManager"].user_manager
+        self.user_manager = UserManager.user_manager
         super(UiRequestPlugin, self).__init__(*args, **kwargs)
 
     # Create new user and inject user welcome message if necessary
@@ -59,7 +67,7 @@ class UiRequestPlugin(object):
             return False
 
         elif loggedin:
-            back = back_generator.next()
+            back = next(back_generator)
             inject_html = """
                 <!-- Multiser plugin -->
                 <script nonce="{script_nonce}">
@@ -76,7 +84,7 @@ class UiRequestPlugin(object):
                 message = "Hello again!"
             inject_html = inject_html.replace("{message}", message)
             inject_html = inject_html.replace("{script_nonce}", self.getScriptNonce())
-            return iter([re.sub("</body>\s*</html>\s*$", inject_html, back)])  # Replace the </body></html> tags with the injection
+            return iter([re.sub(b"</body>\s*</html>\s*$", inject_html.encode(), back)])  # Replace the </body></html> tags with the injection
 
         else:  # No injection necessary
             return back_generator
@@ -103,7 +111,7 @@ class UiWebsocketPlugin(object):
             "muteAdd", "muteRemove", "siteblockAdd", "siteblockRemove", "filterIncludeAdd", "filterIncludeRemove"
         )
         if config.multiuser_no_new_sites:
-            self.multiuser_denied_cmds += ("mergerSiteAdd", )
+            flag.no_multiuser(self.actionMergerSiteAdd)
 
         super(UiWebsocketPlugin, self).__init__(*args, **kwargs)
 
@@ -113,21 +121,21 @@ class UiWebsocketPlugin(object):
         server_info["multiuser"] = True
         if "ADMIN" in self.site.settings["permissions"]:
             server_info["master_address"] = self.user.master_address
+            is_multiuser_admin = config.multiuser_local or self.user.master_address in local_master_addresses
+            server_info["multiuser_admin"] = is_multiuser_admin
         return server_info
 
     # Show current user's master seed
+    @flag.admin
     def actionUserShowMasterSeed(self, to):
-        if "ADMIN" not in self.site.settings["permissions"]:
-            return self.response(to, "Show master seed not allowed")
         message = "<b style='padding-top: 5px; display: inline-block'>Your unique private key:</b>"
         message += "<div style='font-size: 84%%; background-color: #FFF0AD; padding: 5px 8px; margin: 9px 0px'>%s</div>" % self.user.master_seed
         message += "<small>(Save it, you can access your account using this information)</small>"
         self.cmd("notification", ["info", message])
 
     # Logout user
+    @flag.admin
     def actionUserLogout(self, to):
-        if "ADMIN" not in self.site.settings["permissions"]:
-            return self.response(to, "Logout not allowed")
         message = "<b>You have been logged out.</b> <a href='#Login' class='button' id='button_notification'>Login to another account</a>"
         self.cmd("notification", ["done", message, 1000000])  # 1000000 = Show ~forever :)
 
@@ -135,7 +143,7 @@ class UiWebsocketPlugin(object):
         script += "$('#button_notification').on('click', function() { zeroframe.cmd(\"userLoginForm\", []); });"
         self.cmd("injectScript", script)
         # Delete from user_manager
-        user_manager = sys.modules["User.UserManager"].user_manager
+        user_manager = UserManager.user_manager
         if self.user.master_address in user_manager.users:
             if not config.multiuser_local:
                 del user_manager.users[self.user.master_address]
@@ -143,13 +151,59 @@ class UiWebsocketPlugin(object):
         else:
             self.response(to, "User not found")
 
+    @flag.admin
+    def actionUserSet(self, to, master_address):
+        user_manager = UserManager.user_manager
+        user = user_manager.get(master_address)
+        if not user:
+            raise Exception("No user found")
+
+        script = "document.cookie = 'master_address=%s;path=/;max-age=2592000;';" % master_address
+        script += "zeroframe.cmd('wrapperReload', ['login=done']);"
+        self.cmd("notification", ["done", "Successful login, reloading page..."])
+        self.cmd("injectScript", script)
+
+        self.response(to, "ok")
+
+    @flag.admin
+    def actionUserSelectForm(self, to):
+        if not config.multiuser_local:
+            raise Exception("Only allowed in multiuser local mode")
+        user_manager = UserManager.user_manager
+        body = "<span style='padding-bottom: 5px; display: inline-block'>" + "Change account:" + "</span>"
+        for master_address, user in user_manager.list().items():
+            is_active = self.user.master_address == master_address
+            if user.certs:
+                first_cert = next(iter(user.certs.keys()))
+                title = "%s@%s" % (user.certs[first_cert]["auth_user_name"], first_cert)
+            else:
+                title = user.master_address
+                if len(user.sites) < 2 and not is_active:  # Avoid listing ad-hoc created users
+                    continue
+            if is_active:
+                css_class = "active"
+            else:
+                css_class = "noclass"
+            body += "<a href='#Select+user' class='select select-close user %s' title='%s'>%s</a>" % (css_class, user.master_address, title)
+
+        script = """
+             $(".notification .select.user").on("click", function() {
+                $(".notification .select").removeClass('active')
+                zeroframe.response(%s, this.title)
+                return false
+             })
+        """ % self.next_message_id
+
+        self.cmd("notification", ["ask", body], lambda master_address: self.actionUserSet(to, master_address))
+        self.cmd("injectScript", script)
+
     # Show login form
     def actionUserLoginForm(self, to):
         self.cmd("prompt", ["<b>Login</b><br>Your private key:", "password", "Login"], self.responseUserLogin)
 
     # Login form submit
     def responseUserLogin(self, master_seed):
-        user_manager = sys.modules["User.UserManager"].user_manager
+        user_manager = UserManager.user_manager
         user = user_manager.get(CryptBitcoin.privatekeyToAddress(master_seed))
         if not user:
             user = user_manager.create(master_seed=master_seed)
@@ -163,9 +217,10 @@ class UiWebsocketPlugin(object):
             self.actionUserLoginForm(0)
 
     def hasCmdPermission(self, cmd):
-        cmd = cmd[0].lower() + cmd[1:]
-        if not config.multiuser_local and self.user.master_address not in local_master_addresses and cmd in self.multiuser_denied_cmds:
-            self.cmd("notification", ["info", "This function is disabled on this proxy!"])
+        flags = flag.db.get(self.getCmdFuncName(cmd), ())
+        is_public_proxy_user = not config.multiuser_local and self.user.master_address not in local_master_addresses
+        if is_public_proxy_user and "no_multiuser" in flags:
+            self.cmd("notification", ["info", _("This function ({cmd}) is disabled on this proxy!")])
             return False
         else:
             return super(UiWebsocketPlugin, self).hasCmdPermission(cmd)
@@ -207,9 +262,9 @@ class UiWebsocketPlugin(object):
         """.replace("{master_seed}", master_seed)
         self.cmd("injectScript", script)
 
-
     def actionPermissionAdd(self, to, permission):
-        if permission == "NOSANDBOX":
+        is_public_proxy_user = not config.multiuser_local and self.user.master_address not in local_master_addresses
+        if permission == "NOSANDBOX" and is_public_proxy_user:
             self.cmd("notification", ["info", "You can't disable sandbox on this proxy!"])
             self.response(to, {"error": "Denied by proxy"})
             return False
