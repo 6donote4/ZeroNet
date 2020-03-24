@@ -1,4 +1,4 @@
-FROM alpine:3.8
+FROM alpine:3.11 
 
 #Base settings
 ENV HOME /root
@@ -11,6 +11,11 @@ RUN apk --no-cache --no-progress add musl-dev gcc python python-dev py2-pip tor 
  && apk del musl-dev gcc python-dev py2-pip \
  && echo "ControlPort 9051" >> /etc/tor/torrc \
  && echo "CookieAuthentication 1" >> /etc/tor/torrc
+ 
+RUN python3 -V \
+ && python3 -m pip list \
+ && tor --version \
+ && openssl version
 
 #Add Zeronet source
 COPY . /root
